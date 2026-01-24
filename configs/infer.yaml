@@ -1,0 +1,17 @@
+# Inference config (submission)
+# Usage: bash scripts/run_infer.sh configs/infer.yaml
+
+data_root: ./input/uw-madison-gi-tract-image-segmentation
+weights: ./outputs/train_run/best.pt
+out_csv: ./outputs/submission.csv
+
+test_dir: null
+sample_submission: ./input/uw-madison-gi-tract-image-segmentation/sample_submission.csv
+
+sw_patch_d: 80
+sw_patch_h: 224
+sw_patch_w: 224
+sw_batch_size: 1
+threshold: 0.5
+
+num_workers: 2

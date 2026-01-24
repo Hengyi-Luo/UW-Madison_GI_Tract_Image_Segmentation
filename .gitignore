@@ -1,0 +1,5 @@
+/input
+/checkpoints
+/outputs
+__pycache__
+*.pt

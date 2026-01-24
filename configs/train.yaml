@@ -1,0 +1,23 @@
+# Training config
+# Usage: bash scripts/run_train.sh configs/train.yaml
+
+data_root: ./input/uw-madison-gi-tract-image-segmentation
+run_dir: ./outputs/preliminary
+
+epochs: 30
+batch_size: 1
+lr: 0.0001
+
+patch_d: 80
+patch_h: 224
+patch_w: 224
+samples_per_volume: 12
+cache_in_ram: false
+
+num_workers: 4
+seed: 42
+val_ratio: 0.2
+mixed_precision: fp16
+use_tensorboard: true
+tb_dir: ./outputs/train_run/tb
+log_steps: 50

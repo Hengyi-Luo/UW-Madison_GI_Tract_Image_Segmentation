@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from train_3d_monai import TrainCfg, train
+from .train_3d_monai import TrainCfg, train
 
 
 def _load_yaml(path: str):
@@ -36,6 +36,7 @@ def _build_parser(defaults):
     p.add_argument("--use_tensorboard", action="store_true")
     p.add_argument("--tb_dir", type=str, default=defaults.get("tb_dir"))
     p.add_argument("--log_steps", type=int, default=defaults.get("log_steps"))
+    p.add_argument("--debug", action="store_true", default=bool(defaults.get("debug", False)))
     return p
 
 
@@ -72,6 +73,19 @@ def main():
         tb_dir=args.tb_dir or "./outputs/train_run/tb",
         log_steps=args.log_steps or 50,
     )
+
+    if args.debug:
+        if cfg.run_dir:
+            cfg.run_dir = f"{cfg.run_dir}_debug"
+        else:
+            cfg.out = "./outputs/train_run_debug/best.pt"
+            cfg.tb_dir = "./outputs/train_run_debug/tb"
+        cfg.epochs = 1
+        cfg.samples_per_volume = 1
+        cfg.batch_size = 1
+        cfg.num_workers = 0
+        cfg.log_steps = 1
+        cfg.mixed_precision = "no"
 
     train(cfg)
 

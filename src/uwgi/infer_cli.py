@@ -1,7 +1,7 @@
 import argparse
 import os
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -13,7 +13,7 @@ from monai.inferers import sliding_window_inference
 from monai.networks.nets import UNet
 from monai.transforms import Compose, EnsureChannelFirst, EnsureType, ScaleIntensityRange
 
-from train_3d_monai import CLASSES, CLASS2IDX, build_case_day_slices, parse_scan_filename
+from .train_3d_monai import CLASSES, CLASS2IDX, build_case_day_slices, parse_scan_filename
 
 
 def rle_encode(img: np.ndarray) -> str:
@@ -25,9 +25,17 @@ def rle_encode(img: np.ndarray) -> str:
 
 
 class TestVolumeDataset(Dataset):
-    def __init__(self, case_day_slices: Dict[str, List[str]]):
+    def __init__(
+        self,
+        case_day_slices: Dict[str, List[str]],
+        max_cases: Optional[int] = None,
+        max_slices: Optional[int] = None,
+    ):
         self.case_days = sorted(case_day_slices.keys())
+        if max_cases is not None:
+            self.case_days = self.case_days[:max_cases]
         self.case_day_slices = case_day_slices
+        self.max_slices = max_slices
         self.xform = Compose([
             EnsureChannelFirst(channel_dim="no_channel"),
             ScaleIntensityRange(a_min=0, a_max=255, b_min=0.0, b_max=1.0, clip=True),
@@ -40,6 +48,8 @@ class TestVolumeDataset(Dataset):
     def __getitem__(self, idx: int):
         case_day = self.case_days[idx]
         slice_files = self.case_day_slices[case_day]
+        if self.max_slices is not None:
+            slice_files = slice_files[: self.max_slices]
         _, H, W = parse_scan_filename(slice_files[0])
         D = len(slice_files)
 
@@ -83,6 +93,9 @@ def _build_parser(defaults):
     p.add_argument("--sw_batch_size", type=int, default=defaults.get("sw_batch_size"))
     p.add_argument("--threshold", type=float, default=defaults.get("threshold"))
     p.add_argument("--num_workers", type=int, default=defaults.get("num_workers"))
+    p.add_argument("--max_cases", type=int, default=defaults.get("max_cases"))
+    p.add_argument("--max_slices", type=int, default=defaults.get("max_slices"))
+    p.add_argument("--debug", action="store_true", default=bool(defaults.get("debug", False)))
     return p
 
 
@@ -109,9 +122,20 @@ def main():
     if not os.path.exists(weights):
         raise FileNotFoundError(f"Weights not found: {weights}")
 
+    max_cases = args.max_cases
+    max_slices = args.max_slices
+    num_workers = args.num_workers
+
+    if args.debug:
+        if max_cases is None:
+            max_cases = 1
+        if max_slices is None:
+            max_slices = 8
+        num_workers = 0
+
     case_day_slices = build_case_day_slices(test_dir)
-    ds = TestVolumeDataset(case_day_slices)
-    dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=args.num_workers or 2)
+    ds = TestVolumeDataset(case_day_slices, max_cases=max_cases, max_slices=max_slices)
+    dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=num_workers or 2)
 
     model = UNet(
         spatial_dims=3,

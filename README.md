@@ -3,7 +3,7 @@
 This repo follows the same structure as `/home/jeremiah/github/Guqin_Image_Generation/`:
 - `configs/` for YAML configuration
 - `scripts/` for run wrappers
-- `train_cli.py` and `infer_cli.py` as CLI entry points
+- `src/uwgi/` for training and inference modules
 - `outputs/` for checkpoints and inference outputs
 
 ## Setup
@@ -34,5 +34,5 @@ bash scripts/run_infer.sh configs/infer.yaml
 ```
 
 Notes:
-- `infer_cli.py` expects a Kaggle-style `test/` directory under `data_root`.
+- `uwgi.infer_cli` expects a Kaggle-style `test/` directory under `data_root`.
 - If `sample_submission` is provided, outputs are merged to match Kaggle ordering.

@@ -44,4 +44,4 @@ print(' '.join(args))
 echo "Arguments: $ARGS"
 echo ""
 
-python infer_cli.py $ARGS
+PYTHONPATH=src python -m uwgi.infer_cli $ARGS

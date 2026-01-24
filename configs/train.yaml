@@ -21,3 +21,6 @@ mixed_precision: fp16
 use_tensorboard: true
 tb_dir: ./outputs/train_run/tb
 log_steps: 50
+
+debug: true
+

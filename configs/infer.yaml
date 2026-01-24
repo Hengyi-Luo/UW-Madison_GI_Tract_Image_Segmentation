@@ -15,3 +15,5 @@ sw_batch_size: 1
 threshold: 0.5
 
 num_workers: 2
+
+debug: true

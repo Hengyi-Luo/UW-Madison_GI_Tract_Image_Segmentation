@@ -44,4 +44,4 @@ print(' '.join(args))
 echo "Arguments: $ARGS"
 echo ""
 
-python train_cli.py $ARGS
+PYTHONPATH=src python -m uwgi.train_cli $ARGS

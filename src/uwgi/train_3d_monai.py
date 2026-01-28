@@ -4,6 +4,7 @@ import time
 import json
 import random
 import hashlib
+import subprocess
 from datetime import datetime
 from dataclasses import dataclass, fields
 from typing import Dict, List, Tuple
@@ -444,6 +445,41 @@ def _checkpoint_paths(cfg: TrainCfg) -> tuple[str, str]:
     return cfg.out, os.path.join(out_dir, "last.pt")
 
 
+def _git_info(repo_dir: str) -> dict:
+    """Best-effort git metadata for experiment tracking.
+
+    Returns a dict with optional keys: sha, branch, dirty.
+    Never raises (training should not fail if git is unavailable).
+    """
+    info = {}
+    try:
+        sha = subprocess.check_output(
+            ["git", "-C", repo_dir, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode("utf-8", "replace").strip()
+        info["sha"] = sha
+    except Exception:
+        return info
+
+    try:
+        branch = subprocess.check_output(
+            ["git", "-C", repo_dir, "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode("utf-8", "replace").strip()
+        info["branch"] = branch
+    except Exception:
+        pass
+
+    try:
+        # "dirty" if there are uncommitted changes (including untracked).
+        dirty = subprocess.check_output(
+            ["git", "-C", repo_dir, "status", "--porcelain"], stderr=subprocess.DEVNULL
+        ).decode("utf-8", "replace").strip() != ""
+        info["dirty"] = dirty
+    except Exception:
+        pass
+
+    return info
+
+
 def _load_resume_checkpoint(cfg: TrainCfg):
     if not cfg.resume_from:
         return None
@@ -628,6 +664,13 @@ def train(cfg: TrainCfg):
             mlflow.set_tag("backbone", "none")
             mlflow.set_tag("cfg_hash", _cfg_hash(cfg))
             mlflow.set_tag("debug", str(cfg.debug))
+            git = _git_info(os.getcwd())
+            if git.get("sha"):
+                mlflow.set_tag("git_sha", git["sha"])
+            if git.get("branch"):
+                mlflow.set_tag("git_branch", git["branch"])
+            if "dirty" in git:
+                mlflow.set_tag("git_dirty", str(bool(git["dirty"])))
         # Params are immutable in MLflow. When resuming into the *same* run_id we must
         # not re-log params (or change values), otherwise the tracking store errors.
         if not resume_same_run:

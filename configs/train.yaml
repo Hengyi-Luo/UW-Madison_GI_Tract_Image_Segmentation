@@ -2,7 +2,8 @@
 # Usage: bash scripts/run_train.sh configs/train.yaml
 
 data_root: ./input/uw-madison-gi-tract-image-segmentation
-run_dir: ./outputs/preliminary
+# Use `{ts}` and `{run_name}` so each run gets a unique output folder automatically.
+run_dir: ./outputs/uwgi_train_3d/{ts}-{run_name}
 
 epochs: 30
 batch_size: 1
@@ -22,5 +23,11 @@ use_tensorboard: true
 tb_dir: ./outputs/train_run/tb
 log_steps: 50
 
-debug: true
+use_mlflow: true
+# Pin MLflow to the repo-local sqlite backend so UI always finds your experiments.
+mlflow_tracking_uri: "sqlite:////home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/mlflow.db"
+mlflow_experiment: uwgi_train_3d
+mlflow_run_name: 3dunet-c1-patch80-dicece-baseline
+save_last_every: 1
 
+debug: false

@@ -1,8 +1,11 @@
 import os
 import re
 import time
+import json
 import random
-from dataclasses import dataclass
+import hashlib
+from datetime import datetime
+from dataclasses import dataclass, fields
 from typing import Dict, List, Tuple
 
 import cv2
@@ -340,6 +343,8 @@ class TrainCfg:
     data_root: str = "./input/uw-madison-gi-tract-image-segmentation"
     out: str = "./checkpoints/best.pt"
     run_dir: str = ""
+    resume_from: str = ""  # path to a checkpoint like .../last.pt
+    save_last_every: int = 1  # epochs; save .../last.pt every N epochs
     seed: int = 42
 
     patch_d: int = 80
@@ -361,10 +366,138 @@ class TrainCfg:
     use_tensorboard: bool = False
     tb_dir: str = "./outputs/train_run/tb"
     log_steps: int = 50
+    use_mlflow: bool = True
+    mlflow_tracking_uri: str = ""
+    mlflow_experiment: str = "uwgi"
+    mlflow_run_name: str = ""
+    # If provided (or loaded from resume checkpoint), resume logging into the same MLflow run.
+    mlflow_run_id: str = ""
+    debug: bool = False
+
+
+def _cfg_hash(cfg: TrainCfg) -> str:
+    raw = json.dumps(cfg.__dict__, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
+def _default_run_name(cfg: TrainCfg) -> str:
+    ts = datetime.now().strftime("%Y%m%d-%H%M")
+    return (
+        f"{ts}-unet-none-"
+        f"pd{cfg.patch_d}-ph{cfg.patch_h}-pw{cfg.patch_w}-"
+        f"lr{cfg.lr}-seed{cfg.seed}"
+    )
+
+
+def _fmt_template(s: str, ctx: dict) -> str:
+    try:
+        return s.format(**ctx)
+    except KeyError as e:
+        missing = e.args[0]
+        allowed = ", ".join(sorted(ctx.keys()))
+        raise ValueError(f"Unknown template key '{missing}' in '{s}'. Allowed keys: {allowed}")
+
+
+def _resolve_run_naming(cfg: TrainCfg) -> None:
+    """Resolve optional `{...}` templates in mlflow_run_name/run_dir.
+
+    Supported keys:
+      - ts: timestamp like 20260127-163012
+      - experiment: cfg.mlflow_experiment (or "Default")
+      - run_name: the resolved MLflow run name
+      - plus any TrainCfg fields (seed, lr, patch_d, ...)
+    """
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base_ctx = dict(cfg.__dict__)
+    base_ctx.update({"ts": ts, "experiment": cfg.mlflow_experiment or "Default"})
+
+    if cfg.mlflow_run_name:
+        run_name = _fmt_template(cfg.mlflow_run_name, base_ctx)
+    else:
+        run_name = _default_run_name(cfg)
+
+    if cfg.debug and not run_name.endswith("-debug"):
+        run_name = f"{run_name}-debug"
+
+    cfg.mlflow_run_name = run_name
+
+    if cfg.run_dir:
+        cfg.run_dir = _fmt_template(cfg.run_dir, {**base_ctx, "run_name": run_name})
+
+
+def _inner_optimizer(opt):
+    # accelerate wraps optimizers; keep this resilient.
+    return getattr(opt, "optimizer", opt)
+
+
+def _move_optimizer_state_to_device(opt, device: torch.device) -> None:
+    opt = _inner_optimizer(opt)
+    for state in opt.state.values():
+        for k, v in list(state.items()):
+            if torch.is_tensor(v):
+                state[k] = v.to(device)
+
+
+def _checkpoint_paths(cfg: TrainCfg) -> tuple[str, str]:
+    # Keep everything colocated with cfg.out for backward compatibility.
+    out_dir = os.path.dirname(cfg.out)
+    return cfg.out, os.path.join(out_dir, "last.pt")
+
+
+def _load_resume_checkpoint(cfg: TrainCfg):
+    if not cfg.resume_from:
+        return None
+    if not os.path.exists(cfg.resume_from):
+        raise FileNotFoundError(f"resume_from not found: {cfg.resume_from}")
+    return torch.load(cfg.resume_from, map_location="cpu")
+
+
+def _apply_cfg_from_checkpoint(cfg: TrainCfg, ckpt: dict) -> None:
+    """For strict resume, load the previous TrainCfg from checkpoint.
+
+    We intentionally only preserve a small set of "override" fields from the
+    current cfg (e.g., total epochs) to avoid accidental drift.
+    """
+    ckpt_cfg = ckpt.get("cfg")
+    if not isinstance(ckpt_cfg, dict):
+        return
+
+    # Preserve only a few fields that are safe/expected to change on resume.
+    keep = {
+        "resume_from": cfg.resume_from,
+        # If epochs is not provided for resume, use the checkpoint cfg's total epochs.
+        "epochs": cfg.epochs,
+        "save_last_every": cfg.save_last_every,
+        "debug": cfg.debug,
+    }
+    if keep["epochs"] is None:
+        keep.pop("epochs")
+
+    allowed = {f.name for f in fields(TrainCfg)}
+    for k, v in ckpt_cfg.items():
+        if k in allowed:
+            setattr(cfg, k, v)
+
+    for k, v in keep.items():
+        setattr(cfg, k, v)
 
 
 def train(cfg: TrainCfg):
     set_determinism(seed=cfg.seed)
+    ckpt = _load_resume_checkpoint(cfg)
+
+    # If resuming and run_dir still uses templates, keep writing into the existing run folder.
+    if ckpt is not None and cfg.resume_from:
+        _apply_cfg_from_checkpoint(cfg, ckpt)
+        resume_dir = os.path.dirname(cfg.resume_from)
+        if (not cfg.run_dir) or ("{" in cfg.run_dir and "}" in cfg.run_dir):
+            cfg.run_dir = resume_dir
+
+        # Resume MLflow run_id if present in checkpoint (type-3 resume into the same run).
+        if not cfg.mlflow_run_id:
+            cfg.mlflow_run_id = ckpt.get("mlflow_run_id", "") or ckpt.get("mlflow", {}).get("run_id", "")
+
+    _resolve_run_naming(cfg)
     if cfg.run_dir:
         cfg.out = os.path.join(cfg.run_dir, "best.pt")
         if cfg.use_tensorboard:
@@ -448,18 +581,81 @@ def train(cfg: TrainCfg):
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     dice_metric = DiceMetric(include_background=False, reduction="mean")
 
+    start_epoch = 1
+    best_dice = -1.0
+    if ckpt is not None:
+        try:
+            model.load_state_dict(ckpt["model"])
+        except Exception as e:
+            raise RuntimeError(f"Failed to load model state from resume checkpoint: {cfg.resume_from}") from e
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        best_dice = float(ckpt.get("best_dice", -1.0))
+
     model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader
     )
+
+    if ckpt is not None and "optimizer" in ckpt:
+        try:
+            optimizer.load_state_dict(ckpt["optimizer"])
+            _move_optimizer_state_to_device(optimizer, accelerator.device)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load optimizer state from resume checkpoint: {cfg.resume_from}") from e
+
+    mlflow = None
+    mlflow_active = False
+    mlflow_run_id = ""
+    if cfg.use_mlflow and accelerator.is_main_process:
+        try:
+            import mlflow as _mlflow
+        except Exception:
+            raise RuntimeError("MLflow not installed. Please: pip install mlflow")
+        mlflow = _mlflow
+        if cfg.mlflow_tracking_uri:
+            mlflow.set_tracking_uri(cfg.mlflow_tracking_uri)
+        if cfg.mlflow_experiment:
+            mlflow.set_experiment(cfg.mlflow_experiment)
+        run_name = cfg.mlflow_run_name or _default_run_name(cfg)
+        resume_same_run = bool(cfg.mlflow_run_id)
+        if resume_same_run:
+            mlflow.start_run(run_id=cfg.mlflow_run_id)
+        else:
+            mlflow.start_run(run_name=run_name)
+        mlflow_run_id = mlflow.active_run().info.run_id
+        # Avoid overwriting tags on an existing run_id; only add resume-related tags below.
+        if not resume_same_run:
+            mlflow.set_tag("model_name", "unet")
+            mlflow.set_tag("backbone", "none")
+            mlflow.set_tag("cfg_hash", _cfg_hash(cfg))
+            mlflow.set_tag("debug", str(cfg.debug))
+        # Params are immutable in MLflow. When resuming into the *same* run_id we must
+        # not re-log params (or change values), otherwise the tracking store errors.
+        if not resume_same_run:
+            for k, v in cfg.__dict__.items():
+                if k in {"resume_from", "mlflow_run_id"}:
+                    continue
+                mlflow.log_param(k, v)
+        if ckpt is not None:
+            mlflow.set_tag("resume", "true")
+            mlflow.set_tag("resume_from", str(cfg.resume_from))
+            mlflow.set_tag("resumed_at", datetime.now().strftime("%Y%m%d-%H%M%S"))
+        mlflow_active = True
 
     writer = None
     if cfg.use_tensorboard and accelerator.is_main_process:
         os.makedirs(cfg.tb_dir, exist_ok=True)
         writer = SummaryWriter(log_dir=cfg.tb_dir)
 
-    best_dice = -1.0
+    if start_epoch > cfg.epochs:
+        if accelerator.is_main_process:
+            print(f"[WARN] resume epoch ({start_epoch}) > cfg.epochs ({cfg.epochs}). Nothing to do.")
+        if mlflow_active:
+            mlflow.end_run()
+        return
 
-    for epoch in range(1, cfg.epochs + 1):
+    best_path, last_path = _checkpoint_paths(cfg)
+
+    for epoch in range(start_epoch, cfg.epochs + 1):
         model.train()
         t0 = time.time()
         run_loss = 0.0
@@ -502,20 +698,54 @@ def train(cfg: TrainCfg):
             writer.add_scalar("train/epoch_loss", float(avg_loss), epoch)
             writer.add_scalar("val/dice", float(dice), epoch)
             writer.add_scalar("train/epoch_time_sec", float(dt), epoch)
+        if mlflow_active:
+            mlflow.log_metric("train/epoch_loss", float(avg_loss), step=epoch)
+            mlflow.log_metric("val/dice", float(dice), step=epoch)
+            mlflow.log_metric("train/epoch_time_sec", float(dt), step=epoch)
 
         print(f"Epoch {epoch:03d}/{cfg.epochs} | loss={avg_loss:.4f} | val_dice={dice:.4f} | {dt:.1f}s")
 
         if dice > best_dice and accelerator.is_main_process:
             best_dice = dice
             unwrapped = accelerator.unwrap_model(model)
-            torch.save({"model": unwrapped.state_dict(), "cfg": cfg.__dict__}, cfg.out)
-            print(f"  Saved best: {cfg.out} (dice={best_dice:.4f})")
+            torch.save(
+                {
+                    "model": unwrapped.state_dict(),
+                    "optimizer": _inner_optimizer(optimizer).state_dict(),
+                    "epoch": epoch,
+                    "best_dice": best_dice,
+                    "cfg": cfg.__dict__,
+                    "mlflow_run_id": mlflow_run_id,
+                },
+                best_path,
+            )
+            print(f"  Saved best: {best_path} (dice={best_dice:.4f})")
+            if mlflow_active:
+                mlflow.log_metric("best/val_dice", float(best_dice), step=epoch)
+                mlflow.log_artifact(best_path, artifact_path="checkpoints")
+
+        # Save "last" checkpoint for true resume.
+        if accelerator.is_main_process and cfg.save_last_every > 0 and (epoch % cfg.save_last_every == 0):
+            unwrapped = accelerator.unwrap_model(model)
+            torch.save(
+                {
+                    "model": unwrapped.state_dict(),
+                    "optimizer": _inner_optimizer(optimizer).state_dict(),
+                    "epoch": epoch,
+                    "best_dice": best_dice,
+                    "cfg": cfg.__dict__,
+                    "mlflow_run_id": mlflow_run_id,
+                },
+                last_path,
+            )
 
     if writer:
         writer.close()
 
     if accelerator.is_main_process:
         print(f"Done. Best val dice: {best_dice:.4f}")
+    if mlflow_active:
+        mlflow.end_run()
 
 
 if __name__ == "__main__":

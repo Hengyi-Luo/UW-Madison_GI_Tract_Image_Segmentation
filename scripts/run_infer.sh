@@ -6,6 +6,7 @@
 set -e
 
 CONFIG_FILE="${1:-configs/infer.yaml}"
+EXTRA_ARGS="${@:2}"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: Config file not found: $CONFIG_FILE"
@@ -44,4 +45,4 @@ print(' '.join(args))
 echo "Arguments: $ARGS"
 echo ""
 
-PYTHONPATH=src python -m uwgi.infer_cli $ARGS
+PYTHONPATH=src python -m uwgi.infer_cli --config "$CONFIG_FILE" $ARGS $EXTRA_ARGS

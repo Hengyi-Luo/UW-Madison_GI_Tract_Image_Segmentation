@@ -20,6 +20,8 @@ def _build_parser(defaults):
     p.add_argument("--data_root", type=str, default=defaults.get("data_root"))
     p.add_argument("--out", type=str, default=defaults.get("out"))
     p.add_argument("--run_dir", type=str, default=defaults.get("run_dir"))
+    p.add_argument("--resume_from", type=str, default=defaults.get("resume_from"))
+    p.add_argument("--save_last_every", type=int, default=defaults.get("save_last_every"))
     p.add_argument("--epochs", type=int, default=defaults.get("epochs"))
     p.add_argument("--batch_size", type=int, default=defaults.get("batch_size"))
     p.add_argument("--lr", type=float, default=defaults.get("lr"))
@@ -36,6 +38,11 @@ def _build_parser(defaults):
     p.add_argument("--use_tensorboard", action="store_true")
     p.add_argument("--tb_dir", type=str, default=defaults.get("tb_dir"))
     p.add_argument("--log_steps", type=int, default=defaults.get("log_steps"))
+    p.add_argument("--use_mlflow", action="store_true", default=bool(defaults.get("use_mlflow", True)))
+    p.add_argument("--mlflow_tracking_uri", type=str, default=defaults.get("mlflow_tracking_uri"))
+    p.add_argument("--mlflow_experiment", type=str, default=defaults.get("mlflow_experiment"))
+    p.add_argument("--mlflow_run_name", type=str, default=defaults.get("mlflow_run_name"))
+    p.add_argument("--mlflow_run_id", type=str, default=defaults.get("mlflow_run_id"))
     p.add_argument("--debug", action="store_true", default=bool(defaults.get("debug", False)))
     return p
 
@@ -52,11 +59,21 @@ def main():
     p = _build_parser(defaults)
     args = p.parse_args()
 
+    # Allow "epochs: null" (or omitted) in resume configs to mean:
+    #   - if resuming: use total epochs from checkpoint cfg
+    #   - otherwise: default to 30
+    if args.epochs is None:
+        epochs = None if args.resume_from else 30
+    else:
+        epochs = args.epochs
+
     cfg = TrainCfg(
         data_root=args.data_root or "./input/uw-madison-gi-tract-image-segmentation",
         out=args.out or "./outputs/train_run/best.pt",
         run_dir=args.run_dir or "",
-        epochs=args.epochs or 30,
+        resume_from=args.resume_from or "",
+        save_last_every=int(args.save_last_every or 1),
+        epochs=epochs,
         batch_size=args.batch_size or 1,
         lr=args.lr or 1e-4,
         patch_d=args.patch_d or 80,
@@ -72,6 +89,12 @@ def main():
         use_tensorboard=args.use_tensorboard,
         tb_dir=args.tb_dir or "./outputs/train_run/tb",
         log_steps=args.log_steps or 50,
+        use_mlflow=args.use_mlflow,
+        mlflow_tracking_uri=args.mlflow_tracking_uri or "",
+        mlflow_experiment=args.mlflow_experiment or "uwgi",
+        mlflow_run_name=args.mlflow_run_name or "",
+        mlflow_run_id=args.mlflow_run_id or "",
+        debug=args.debug,
     )
 
     if args.debug:

@@ -1,0 +1,17 @@
+# Resume training in-place (type-3 MLflow resume: same run_id, continuous curves).
+# Usage:
+#   bash scripts/run_train.sh configs/train_resume.yaml --resume_from /path/to/last.pt --epochs 50
+#
+# On resume, the code loads the previous run's saved TrainCfg from the checkpoint.
+# Only a few fields are allowed to differ (epochs/save_last_every/debug).
+
+# REQUIRED: point to the checkpoint to resume from (recommended: last.pt).
+resume_from: null
+
+# Total epochs to run to. If null, uses the checkpoint cfg's total epochs.
+epochs: null
+
+# Save .../last.pt every N epochs during this resumed run.
+save_last_every: 1
+
+debug: false

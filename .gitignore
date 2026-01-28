@@ -1,5 +1,13 @@
 /input
 /checkpoints
 /outputs
+mlruns/
+mlflow.db
 __pycache__
 *.pt
+*.pth
+*.ckpt
+*.onnx
+tmp*.ipynb
+.ipynb_checkpoints/
+kaggle_weights/

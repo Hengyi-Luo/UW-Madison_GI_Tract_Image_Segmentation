@@ -9,11 +9,16 @@ epochs: 30
 batch_size: 1
 lr: 0.0001
 
-patch_d: 80
-patch_h: 224
-patch_w: 224
+patch_d: 96
+patch_h: 96
+patch_w: 96
 samples_per_volume: 12
 cache_in_ram: false
+
+model: swin_unetr
+feature_size: 48
+use_checkpoint: false
+init_from: null
 
 num_workers: 4
 seed: 42

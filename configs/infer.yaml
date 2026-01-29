@@ -8,9 +8,9 @@ out_csv: ./outputs/submission.csv
 test_dir: null
 sample_submission: ./input/uw-madison-gi-tract-image-segmentation/sample_submission.csv
 
-sw_patch_d: 80
-sw_patch_h: 224
-sw_patch_w: 224
+sw_patch_d: 96
+sw_patch_h: 96
+sw_patch_w: 96
 sw_batch_size: 1
 threshold: 0.5
 

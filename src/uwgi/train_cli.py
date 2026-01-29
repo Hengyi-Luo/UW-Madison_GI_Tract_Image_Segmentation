@@ -29,6 +29,10 @@ def _build_parser(defaults):
     p.add_argument("--patch_h", type=int, default=defaults.get("patch_h"))
     p.add_argument("--patch_w", type=int, default=defaults.get("patch_w"))
     p.add_argument("--samples_per_volume", type=int, default=defaults.get("samples_per_volume"))
+    p.add_argument("--model", type=str, default=defaults.get("model"))
+    p.add_argument("--feature_size", type=int, default=defaults.get("feature_size"))
+    p.add_argument("--use_checkpoint", action="store_true", default=bool(defaults.get("use_checkpoint", False)))
+    p.add_argument("--init_from", type=str, default=defaults.get("init_from"))
     p.add_argument("--cache_in_ram", action="store_true")
     p.add_argument("--num_workers", type=int, default=defaults.get("num_workers"))
     p.add_argument("--seed", type=int, default=defaults.get("seed"))
@@ -76,10 +80,14 @@ def main():
         epochs=epochs,
         batch_size=args.batch_size or 1,
         lr=args.lr or 1e-4,
-        patch_d=args.patch_d or 80,
+        patch_d=args.patch_d or 96,
         patch_h=args.patch_h or 224,
         patch_w=args.patch_w or 224,
         samples_per_volume=args.samples_per_volume or 12,
+        model=args.model or "swin_unetr",
+        feature_size=args.feature_size or 48,
+        use_checkpoint=bool(args.use_checkpoint),
+        init_from=args.init_from or "",
         cache_in_ram=args.cache_in_ram,
         num_workers=args.num_workers or 4,
         seed=args.seed or 42,

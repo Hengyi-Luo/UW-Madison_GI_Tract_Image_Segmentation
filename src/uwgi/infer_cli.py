@@ -1,72 +1,19 @@
 import argparse
 import os
 import sys
-from typing import Dict, List, Tuple, Optional
 
-import cv2
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 from monai.inferers import sliding_window_inference
-from monai.networks.nets import UNet
-from monai.transforms import Compose, EnsureChannelFirst, EnsureType, ScaleIntensityRange
 
-from .train_3d_monai import CLASSES, CLASS2IDX, build_case_day_slices, parse_scan_filename
-
-
-def rle_encode(img: np.ndarray) -> str:
-    pixels = img.flatten()
-    pixels = np.concatenate([[0], pixels, [0]])
-    runs = np.where(pixels[1:] != pixels[:-1])[0] + 1
-    runs[1::2] -= runs[::2]
-    return " ".join(str(x) for x in runs)
-
-
-class TestVolumeDataset(Dataset):
-    def __init__(
-        self,
-        case_day_slices: Dict[str, List[str]],
-        max_cases: Optional[int] = None,
-        max_slices: Optional[int] = None,
-    ):
-        self.case_days = sorted(case_day_slices.keys())
-        if max_cases is not None:
-            self.case_days = self.case_days[:max_cases]
-        self.case_day_slices = case_day_slices
-        self.max_slices = max_slices
-        self.xform = Compose([
-            EnsureChannelFirst(channel_dim="no_channel"),
-            ScaleIntensityRange(a_min=0, a_max=255, b_min=0.0, b_max=1.0, clip=True),
-            EnsureType(data_type="tensor"),
-        ])
-
-    def __len__(self):
-        return len(self.case_days)
-
-    def __getitem__(self, idx: int):
-        case_day = self.case_days[idx]
-        slice_files = self.case_day_slices[case_day]
-        if self.max_slices is not None:
-            slice_files = slice_files[: self.max_slices]
-        _, H, W = parse_scan_filename(slice_files[0])
-        D = len(slice_files)
-
-        img_vol = np.zeros((D, H, W), dtype=np.uint8)
-        slice_indices = []
-        for z, f in enumerate(slice_files):
-            slice_idx, h, w = parse_scan_filename(f)
-            if h != H or w != W:
-                raise ValueError(f"Inconsistent shape in {case_day}: {f}")
-            img = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                raise RuntimeError(f"Failed to read image: {f}")
-            img_vol[z] = img
-            slice_indices.append(slice_idx)
-
-        x = self.xform(img_vol)  # (1,D,H,W)
-        return x, case_day, slice_indices
+from .constants import CLASS2IDX
+from .data_utils import build_case_day_slices
+from .datasets import TestVolumeDataset
+from .models import build_model
+from .rle import rle_encode
 
 
 def _load_yaml(path: str):
@@ -137,26 +84,31 @@ def main():
     ds = TestVolumeDataset(case_day_slices, max_cases=max_cases, max_slices=max_slices)
     dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=num_workers or 2)
 
-    model = UNet(
-        spatial_dims=3,
+    ckpt = torch.load(weights, map_location="cpu")
+    cfg = ckpt.get("cfg", {}) if isinstance(ckpt, dict) else {}
+    model_name = cfg.get("model", "unet")
+    patch_size = (
+        int(cfg.get("patch_d", args.sw_patch_d or 96)),
+        int(cfg.get("patch_h", args.sw_patch_h or 224)),
+        int(cfg.get("patch_w", args.sw_patch_w or 224)),
+    )
+    model = build_model(
+        model_name=model_name,
+        patch_size=patch_size,
         in_channels=1,
         out_channels=3,
-        channels=(32, 64, 128, 256, 512),
-        strides=(2, 2, 2, 2),
-        num_res_units=2,
-        dropout=0.2,
+        feature_size=int(cfg.get("feature_size", 48)),
+        use_checkpoint=bool(cfg.get("use_checkpoint", False)),
     )
-
-    ckpt = torch.load(weights, map_location="cpu")
     model.load_state_dict(ckpt["model"])
     model.eval()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
     roi_size = (
-        args.sw_patch_d or 80,
-        args.sw_patch_h or 224,
-        args.sw_patch_w or 224,
+        args.sw_patch_d or patch_size[0],
+        args.sw_patch_h or patch_size[1],
+        args.sw_patch_w or patch_size[2],
     )
     sw_batch_size = args.sw_batch_size or 1
     thr = args.threshold if args.threshold is not None else 0.5

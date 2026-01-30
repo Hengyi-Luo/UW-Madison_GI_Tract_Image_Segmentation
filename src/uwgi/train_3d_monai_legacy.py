@@ -41,8 +41,8 @@ def rle_decode(rle: str, height: int, width: int) -> np.ndarray:
     rle: "start length start length ..."
     Returns (H, W) uint8 mask {0,1}
 
-    Note: Kaggle RLE for this comp is in column-major order.
-    The reshape+transpose below matches common Kaggle implementations.
+    Note: This legacy script uses the same C-order decode as `src/uwgi/rle.py`,
+    matching `tmp.ipynb`.
     """
     if rle is None or rle == "" or (isinstance(rle, float) and np.isnan(rle)):
         return np.zeros((height, width), dtype=np.uint8)
@@ -56,8 +56,7 @@ def rle_decode(rle: str, height: int, width: int) -> np.ndarray:
     for lo, hi in zip(starts, ends):
         img[lo:hi] = 1
 
-    # column-major to (H,W)
-    return img.reshape((width, height)).T
+    return img.reshape((height, width))  # C order
 
 
 # -------------------------

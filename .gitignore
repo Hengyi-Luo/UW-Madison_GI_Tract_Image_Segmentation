@@ -3,6 +3,7 @@
 /outputs
 mlruns/
 mlflow.db
+mlflow.db.bak-*
 __pycache__
 *.pt
 *.pth

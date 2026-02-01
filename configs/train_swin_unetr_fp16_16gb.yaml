@@ -1,28 +1,23 @@
-# SwinUNETR + BTCV pretrained init (weights only).
-# 1) bash scripts/download_swin_unetr_btcv.sh
-# 2) bash scripts/run_train.sh configs/train_swin_unetr_btcv_init.yaml
+# SwinUNETR (3D) for ~16GB VRAM, fp16, 30 epochs
+# Usage: bash scripts/run_train.sh configs/train_swin_unetr_fp16_16gb.yaml
 
 data_root: ./input/uw-madison-gi-tract-image-segmentation
-run_dir: ./outputs/uwgi_train_swinunetr_btcv_init/{ts}-{run_name}
+run_dir: ./outputs/uwgi_train_swin_unetr/{ts}-{run_name}
 
 model: swin_unetr
-feature_size: 48
-use_checkpoint: false
 
-# SwinUNETR prefers patch dims divisible by 32; BTCV bundle uses 96^3.
+# For SwinUNETR, patch dims should be divisible by 32.
 patch_d: 96
 patch_h: 96
 patch_w: 96
-samples_per_volume: 24
+samples_per_volume: 12
 train_fg_ratio: 0.7
 train_fg_min_voxels: 16
 train_fg_jitter: 16
 
-# Optional: full-volume validation via sliding-window inference (slow).
-# val_sw_every: 5
-# best_metric: sw
-# val_sw_overlap: 0.25
-# val_sw_batch_size: 1
+# Swin params (smaller feature_size + checkpointing fits 16GB better)
+feature_size: 24
+use_checkpoint: true
 
 epochs: 30
 batch_size: 1
@@ -31,10 +26,13 @@ lr: 0.0001
 num_workers: 4
 seed: 42
 val_ratio: 0.2
+
+# Optional: explicit split (overrides val_ratio split). Files can be csv/txt/json.
+train_ids: ./input/uw-madison-gi-tract-image-segmentation/splits/train_case_days.csv
+val_ids: ./input/uw-madison-gi-tract-image-segmentation/splits/val_case_days.csv
+ids_column: case_day
+
 mixed_precision: fp16
-
-init_from: ./pretrained/swin_unetr_btcv/models/model.pt
-
 use_tensorboard: true
 log_steps: 50
 
@@ -47,8 +45,8 @@ val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_s
 
 use_mlflow: true
 mlflow_tracking_uri: "sqlite:////home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/mlflow.db"
-mlflow_experiment: uwgi_train_swinunetr
-mlflow_run_name: swinunetr-btcv-init
+mlflow_experiment: uwgi_train_swin_unetr
+mlflow_run_name: swinunetr-fp16-96cube-fs24-ckpt
 save_last_every: 1
 
 debug: false

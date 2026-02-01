@@ -11,5 +11,12 @@ mlflow_experiment: sandbox_debug
 mlflow_run_name: debug-smoke
 save_last_every: 1
 
+# TensorBoard + fixed val sample visualization.
+use_tensorboard: true
+val_vis_every: 1
+val_vis_n: 16
+val_vis_threshold: 0.5
+val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
+
 # Most other values will be overridden by `debug: true` in `uwgi.train_cli`.
 debug: true

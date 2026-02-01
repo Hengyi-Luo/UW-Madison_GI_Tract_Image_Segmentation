@@ -1,0 +1,48 @@
+# UNet (3D) baseline for ~16GB VRAM, fp16, 30 epochs
+# Usage: bash scripts/run_train.sh configs/train_unet_fp16_16gb.yaml
+
+data_root: ./input/uw-madison-gi-tract-image-segmentation
+run_dir: ./outputs/{experiment}/{ts}-{run_name}
+
+model: unet
+
+# Patch training
+patch_d: 96
+patch_h: 96
+patch_w: 96
+samples_per_volume: 12
+train_fg_ratio: 0.7
+train_fg_min_voxels: 16
+train_fg_jitter: 16
+
+epochs: 30
+batch_size: 10
+lr: 0.0001
+
+num_workers: 4
+seed: 42
+val_ratio: 0.2
+
+# Optional: explicit split (overrides val_ratio split). Files can be csv/txt/json.
+train_ids: ./input/uw-madison-gi-tract-image-segmentation/splits/train_case_days.csv
+val_ids: ./input/uw-madison-gi-tract-image-segmentation/splits/val_case_days.csv
+ids_column: case_day
+
+mixed_precision: fp16
+use_tensorboard: true
+log_steps: 50
+
+# Val visualization (TensorBoard): log fixed GT vs Pred slices.
+# Uses a pre-generated sample list (do not re-sample during training).
+val_vis_every: 1
+val_vis_n: 16
+val_vis_threshold: 0.5
+val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
+
+use_mlflow: true
+mlflow_tracking_uri: "sqlite:////home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/mlflow.db"
+mlflow_experiment: uwgi_train_unet
+mlflow_run_name: 3dunet-modified-rle
+save_last_every: 1
+
+debug: false

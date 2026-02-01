@@ -62,3 +62,31 @@ def validate_dice(
 
     return float(dice_metric.aggregate().item())
 
+
+@torch.no_grad()
+def validate_sliding_window_dice(
+    model: torch.nn.Module,
+    val_loader,
+    dice_metric,
+    accelerator,
+    device: torch.device,
+    roi_size: Tuple[int, int, int],
+    sw_batch_size: int = 1,
+    overlap: float = 0.25,
+    threshold: float = 0.5,
+) -> float:
+    from monai.inferers import sliding_window_inference
+
+    model.eval()
+    dice_metric.reset()
+
+    for x, y, _ in val_loader:
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        with accelerator.autocast():
+            logits = sliding_window_inference(x, roi_size, int(sw_batch_size), model, overlap=float(overlap))
+            prob = torch.sigmoid(logits)
+            pred = (prob > threshold).float()
+        dice_metric(y_pred=pred, y=y)
+
+    return float(dice_metric.aggregate().item())

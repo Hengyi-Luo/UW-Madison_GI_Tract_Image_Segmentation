@@ -3,6 +3,17 @@ from __future__ import annotations
 import numpy as np
 
 
+def rle_area(rle: str) -> int:
+    """Return foreground pixel count for a Kaggle RLE string."""
+    if rle is None or rle == "" or (isinstance(rle, float) and np.isnan(rle)):
+        return 0
+    s = str(rle).strip().split()
+    if len(s) < 2:
+        return 0
+    lengths = np.asarray(s[1::2], dtype=np.int64)
+    return int(lengths.sum())
+
+
 def rle_decode(rle: str, height: int, width: int) -> np.ndarray:
     """Kaggle RLE decode for 2D mask.
 

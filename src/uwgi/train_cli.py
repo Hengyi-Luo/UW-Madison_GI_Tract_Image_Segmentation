@@ -39,6 +39,23 @@ def _build_parser(defaults):
     p.add_argument("--val_sw_batch_size", type=int, default=defaults.get("val_sw_batch_size"))
     p.add_argument("--val_sw_overlap", type=float, default=defaults.get("val_sw_overlap"))
     p.add_argument("--best_metric", type=str, default=defaults.get("best_metric"))
+    p.add_argument("--val_full_spatial_order", type=str, default=defaults.get("val_full_spatial_order"))
+    p.add_argument("--val_full_normalize", type=str, default=defaults.get("val_full_normalize"))
+    p.add_argument(
+        "--val_full_tta",
+        dest="val_full_tta",
+        action="store_true",
+        default=bool(defaults.get("val_full_tta", False)),
+        help="Enable flip TTA for full-volume kaggle_score eval (default: False).",
+    )
+    p.add_argument(
+        "--no_val_full_tta",
+        dest="val_full_tta",
+        action="store_false",
+        help="Disable flip TTA for full-volume kaggle_score eval.",
+    )
+    p.add_argument("--val_full_threshold", type=float, default=defaults.get("val_full_threshold"))
+    p.add_argument("--val_full_hausdorff_empty_score", type=float, default=defaults.get("val_full_hausdorff_empty_score"))
     p.add_argument("--val_vis_every", type=int, default=defaults.get("val_vis_every"))
     p.add_argument("--val_vis_n", type=int, default=defaults.get("val_vis_n"))
     p.add_argument("--val_vis_threshold", type=float, default=defaults.get("val_vis_threshold"))
@@ -111,6 +128,11 @@ def main():
         val_sw_batch_size=int(args.val_sw_batch_size or 1),
         val_sw_overlap=float(args.val_sw_overlap or 0.25),
         best_metric=args.best_metric or "patch",
+        val_full_spatial_order=(args.val_full_spatial_order or "DHW"),
+        val_full_normalize=(args.val_full_normalize or "none"),
+        val_full_tta=bool(args.val_full_tta),
+        val_full_threshold=float(args.val_full_threshold or 0.5),
+        val_full_hausdorff_empty_score=float(args.val_full_hausdorff_empty_score or 0.0),
         val_vis_every=int(args.val_vis_every or 0),
         val_vis_n=int(args.val_vis_n or 16),
         val_vis_threshold=float(args.val_vis_threshold or 0.5),

@@ -1,4 +1,4 @@
-# UNet (3D) baseline for ~16GB VRAM, fp16, 30 epochs
+# UNet (3D) long-run config for ~16GB VRAM, fp16
 # Usage: bash scripts/run_train.sh configs/train_unet_fp16_16gb.yaml
 
 data_root: ./input/uw-madison-gi-tract-image-segmentation
@@ -10,14 +10,26 @@ model: unet
 patch_d: 96
 patch_h: 96
 patch_w: 96
-samples_per_volume: 12
-train_fg_ratio: 0.7
+samples_per_volume: 16
+train_fg_ratio: 0.8
 train_fg_min_voxels: 16
-train_fg_jitter: 16
+train_fg_jitter: 24
 
-epochs: 30
-batch_size: 10
-lr: 0.0001
+epochs: 150
+batch_size: 12
+lr: 0.0003
+
+# Optional: full-volume validation via sliding-window inference (slow).
+val_sw_every: 5
+best_metric: sw
+val_sw_overlap: 0.25
+val_sw_batch_size: 1
+
+# Full-volume Kaggle-style score (saved under run_dir/val_full/epoch_XXX).
+val_full_spatial_order: DHW
+val_full_normalize: none
+val_full_tta: false
+val_full_threshold: 0.5
 
 num_workers: 4
 seed: 42
@@ -42,7 +54,7 @@ val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_s
 use_mlflow: true
 mlflow_tracking_uri: "sqlite:////home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/mlflow.db"
 mlflow_experiment: uwgi_train_unet
-mlflow_run_name: 3dunet-modified-rle
+mlflow_run_name: 3dunet-150ep
 save_last_every: 1
 
 debug: false

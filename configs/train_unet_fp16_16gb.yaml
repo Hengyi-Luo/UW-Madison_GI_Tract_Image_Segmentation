@@ -1,23 +1,23 @@
-# Training config
-# Usage: bash scripts/run_train.sh configs/train.yaml
+# UNet (3D) long-run config for ~16GB VRAM, fp16
+# Usage: bash scripts/run_train.sh configs/train_unet_fp16_16gb.yaml
 
 data_root: ./input/uw-madison-gi-tract-image-segmentation
-# Use `{ts}` and `{run_name}` so each run gets a unique output folder automatically.
 run_dir: ./outputs/{experiment}/{ts}-{run_name}
 
-epochs: 30
-batch_size: 8
-lr: 0.0005
+model: unet
 
+# Patch training
 patch_d: 96
 patch_h: 96
 patch_w: 96
-samples_per_volume: 12
-cache_in_ram: false
-
-train_fg_ratio: 0.7
+samples_per_volume: 16
+train_fg_ratio: 0.8
 train_fg_min_voxels: 16
-train_fg_jitter: 16
+train_fg_jitter: 24
+
+epochs: 150
+batch_size: 12
+lr: 0.0003
 
 # Optional: full-volume validation via sliding-window inference (slow).
 val_sw_every: 5
@@ -25,17 +25,11 @@ best_metric: sw
 val_sw_overlap: 0.25
 val_sw_batch_size: 1
 
-# Val visualization (TensorBoard): log fixed GT vs Pred slices.
-# Uses a pre-generated sample list under ./outputs/eval (do not re-sample during training).
-val_vis_every: 1
-val_vis_n: 16
-val_vis_threshold: 0.5
-val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
-
-model: unet
-feature_size: 48
-use_checkpoint: false
-init_from: null
+# Full-volume Kaggle-style score (saved under run_dir/val_full/epoch_XXX).
+val_full_spatial_order: DHW
+val_full_normalize: none
+val_full_tta: false
+val_full_threshold: 0.5
 
 num_workers: 4
 seed: 42
@@ -44,17 +38,23 @@ val_ratio: 0.2
 # Optional: explicit split (overrides val_ratio split). Files can be csv/txt/json.
 train_ids: ./input/uw-madison-gi-tract-image-segmentation/splits/train_case_days.csv
 val_ids: ./input/uw-madison-gi-tract-image-segmentation/splits/val_case_days.csv
-# ids_column: case_day
+ids_column: case_day
+
 mixed_precision: fp16
 use_tensorboard: true
-tb_dir: ./outputs/train_run/tb
 log_steps: 50
 
+# Val visualization (TensorBoard): log fixed GT vs Pred slices.
+# Uses a pre-generated sample list (do not re-sample during training).
+val_vis_every: 1
+val_vis_n: 16
+val_vis_threshold: 0.5
+val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
+
 use_mlflow: true
-# Pin MLflow to the repo-local sqlite backend so UI always finds your experiments.
 mlflow_tracking_uri: "sqlite:////home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/mlflow.db"
 mlflow_experiment: uwgi_train_unet
-mlflow_run_name: 3dunet-c1-patch80-dicece-baseline
+mlflow_run_name: 3dunet-150ep
 save_last_every: 1
 
 debug: false

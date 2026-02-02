@@ -14,4 +14,10 @@ epochs: null
 # Save .../last.pt every N epochs during this resumed run.
 save_last_every: 1
 
+# TensorBoard val sample visualization (uses the checkpoint cfg on resume).
+val_vis_every: 1
+val_vis_n: 16
+val_vis_threshold: 0.5
+val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
+
 debug: false

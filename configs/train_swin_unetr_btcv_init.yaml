@@ -1,0 +1,54 @@
+# SwinUNETR + BTCV pretrained init (weights only).
+# 1) bash scripts/download_swin_unetr_btcv.sh
+# 2) bash scripts/run_train.sh configs/train_swin_unetr_btcv_init.yaml
+
+data_root: ./input/uw-madison-gi-tract-image-segmentation
+run_dir: ./outputs/uwgi_train_swinunetr_btcv_init/{ts}-{run_name}
+
+model: swin_unetr
+feature_size: 48
+use_checkpoint: false
+
+# SwinUNETR prefers patch dims divisible by 32; BTCV bundle uses 96^3.
+patch_d: 96
+patch_h: 96
+patch_w: 96
+samples_per_volume: 24
+train_fg_ratio: 0.7
+train_fg_min_voxels: 16
+train_fg_jitter: 16
+
+# Optional: full-volume validation via sliding-window inference (slow).
+# val_sw_every: 5
+# best_metric: sw
+# val_sw_overlap: 0.25
+# val_sw_batch_size: 1
+
+epochs: 30
+batch_size: 1
+lr: 0.0001
+
+num_workers: 4
+seed: 42
+val_ratio: 0.2
+mixed_precision: fp16
+
+init_from: ./pretrained/swin_unetr_btcv/models/model.pt
+
+use_tensorboard: true
+log_steps: 50
+
+# Val visualization (TensorBoard): log fixed GT vs Pred slices.
+# Uses a pre-generated sample list under ./outputs/eval (do not re-sample during training).
+val_vis_every: 1
+val_vis_n: 16
+val_vis_threshold: 0.5
+val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
+
+use_mlflow: true
+mlflow_tracking_uri: "sqlite:////home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/mlflow.db"
+mlflow_experiment: uwgi_train_swinunetr
+mlflow_run_name: swinunetr-btcv-init
+save_last_every: 1
+
+debug: false

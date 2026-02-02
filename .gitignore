@@ -3,6 +3,7 @@
 /outputs
 mlruns/
 mlflow.db
+mlflow.db.bak-*
 __pycache__
 *.pt
 *.pth
@@ -11,3 +12,4 @@ __pycache__
 tmp*.ipynb
 .ipynb_checkpoints/
 kaggle_weights/
+fork-of-best-public-kernel-ef10e0.ipynb

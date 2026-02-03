@@ -18,6 +18,6 @@ save_last_every: 1
 val_vis_every: 1
 val_vis_n: 16
 val_vis_threshold: 0.5
-val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
+val_vis_samples: /home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.json
 
 debug: false

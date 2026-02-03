@@ -106,7 +106,7 @@ def main():
         epochs = args.epochs
 
     cfg = TrainCfg(
-        data_root=args.data_root or "./input/uw-madison-gi-tract-image-segmentation",
+        data_root=args.data_root or "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs",
         out=args.out or "./outputs/train_run/best.pt",
         run_dir=args.run_dir or "",
         resume_from=args.resume_from or "",
@@ -137,7 +137,7 @@ def main():
         val_vis_n=int(args.val_vis_n or 16),
         val_vis_threshold=float(args.val_vis_threshold or 0.5),
         val_vis_samples=args.val_vis_samples
-        or "./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json",
+        or "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.json",
         model=args.model or "swin_unetr",
         feature_size=args.feature_size or 48,
         use_checkpoint=bool(args.use_checkpoint),

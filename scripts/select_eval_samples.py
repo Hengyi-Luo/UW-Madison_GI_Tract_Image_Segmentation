@@ -8,7 +8,7 @@ Current requirement:
   - area is not important (use --min_area to tweak, default is minimal)
 
 Outputs are written under:
-  ./input/uw-madison-gi-tract-image-segmentation/splits
+  /home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits
 """
 
 from __future__ import annotations
@@ -222,7 +222,7 @@ def _pick_samples(
 def _assert_inside_input_splits(out_path: str) -> None:
     out_abs = os.path.abspath(out_path)
     allowed = os.path.abspath(
-        os.path.join(".", "input", "uw-madison-gi-tract-image-segmentation", "splits")
+        "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits"
     )
     if not (out_abs == allowed or out_abs.startswith(allowed + os.sep)):
         raise ValueError(f"This script only writes under {allowed}. Got: {out_abs}")
@@ -230,7 +230,7 @@ def _assert_inside_input_splits(out_path: str) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--data_root", type=str, default="./input/uw-madison-gi-tract-image-segmentation")
+    p.add_argument("--data_root", type=str, default="/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs")
     p.add_argument("--val_ids", type=str, required=True)
     p.add_argument("--ids_column", type=str, default="")
     p.add_argument("--n", type=int, default=16)
@@ -239,12 +239,12 @@ def main() -> None:
     p.add_argument(
         "--out",
         type=str,
-        default="./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json",
+        default="/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.json",
     )
     p.add_argument(
         "--csv_out",
         type=str,
-        default="./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.csv",
+        default="/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.csv",
     )
     p.add_argument(
         "--allow_less",

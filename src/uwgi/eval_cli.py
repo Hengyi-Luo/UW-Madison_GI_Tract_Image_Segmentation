@@ -122,7 +122,7 @@ def main():
     p = _build_parser(defaults)
     args = p.parse_args()
 
-    data_root = args.data_root or "./input/uw-madison-gi-tract-image-segmentation"
+    data_root = args.data_root or "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs"
     train_dir = os.path.join(data_root, "train")
     train_csv = os.path.join(data_root, "train.csv")
     weights = args.weights or "./outputs/train_run/best.pt"

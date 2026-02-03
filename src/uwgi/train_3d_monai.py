@@ -536,7 +536,7 @@ def _log_val_samples_to_tb(
 @dataclass
 class TrainCfg:
     # Data
-    data_root: str = "./input/uw-madison-gi-tract-image-segmentation"
+    data_root: str = "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs"
     seed: int = 42
     val_ratio: float = 0.2
     train_ids: str = ""  # optional explicit train case_day list file (csv/txt/json)
@@ -575,7 +575,7 @@ class TrainCfg:
     val_vis_every: int = 0  # 0 = disabled; otherwise log every N epochs
     val_vis_n: int = 16
     val_vis_threshold: float = 0.5
-    val_vis_samples: str = "./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json"
+    val_vis_samples: str = "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.json"
 
     # Model
     model: str = "swin_unetr"  # unet | swin_unetr

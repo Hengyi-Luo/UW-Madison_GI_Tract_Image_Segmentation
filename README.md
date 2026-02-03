@@ -79,7 +79,7 @@ Use `val_pipeline.ipynb` to pick and visualize a small set of validation slices 
 During training, you can also log a fixed set of val slice visualizations to TensorBoard via:
 - `val_vis_every` (0 disables)
 - `val_vis_n` (default 16)
-- `val_vis_samples` (JSON path, default: `./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json`)
+- `val_vis_samples` (JSON path, default: `/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.json`)
 
 For quick GT visualization in notebooks, see `uwgi.viz.plot_case_day_slice_gt`.
 For GT vs prediction visualization, see `uwgi.viz.plot_case_day_slice_gt_pred`.

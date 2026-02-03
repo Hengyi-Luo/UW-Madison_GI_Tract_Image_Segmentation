@@ -1,7 +1,7 @@
 # SwinUNETR (3D) for ~16GB VRAM, fp16, 30 epochs
 # Usage: bash scripts/run_train.sh configs/train_swin_unetr_fp16_16gb.yaml
 
-data_root: ./input/uw-madison-gi-tract-image-segmentation
+data_root: /home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs
 run_dir: ./outputs/uwgi_train_swin_unetr/{ts}-{run_name}
 
 model: swin_unetr
@@ -28,8 +28,8 @@ seed: 42
 val_ratio: 0.2
 
 # Optional: explicit split (overrides val_ratio split). Files can be csv/txt/json.
-train_ids: ./input/uw-madison-gi-tract-image-segmentation/splits/train_case_days.csv
-val_ids: ./input/uw-madison-gi-tract-image-segmentation/splits/val_case_days.csv
+train_ids: /home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/train_case_days.csv
+val_ids: /home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_case_days.csv
 ids_column: case_day
 
 mixed_precision: fp16
@@ -41,7 +41,7 @@ log_steps: 50
 val_vis_every: 1
 val_vis_n: 16
 val_vis_threshold: 0.5
-val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
+val_vis_samples: /home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.json
 
 use_mlflow: true
 mlflow_tracking_uri: "sqlite:////home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/mlflow.db"

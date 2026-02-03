@@ -1,7 +1,7 @@
 # Debug training config
 # Usage: bash scripts/run_train.sh configs/train_debug.yaml
 
-data_root: ./input/uw-madison-gi-tract-image-segmentation
+data_root: /home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs
 run_dir: ./outputs/sandbox_debug/{ts}-{run_name}
 
 # Keep debug runs isolated in MLflow.
@@ -16,7 +16,7 @@ use_tensorboard: true
 val_vis_every: 1
 val_vis_n: 16
 val_vis_threshold: 0.5
-val_vis_samples: ./input/uw-madison-gi-tract-image-segmentation/splits/val_vis_samples.json
+val_vis_samples: /home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.json
 
 # Most other values will be overridden by `debug: true` in `uwgi.train_cli`.
 debug: true

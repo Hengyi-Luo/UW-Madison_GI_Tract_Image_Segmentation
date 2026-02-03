@@ -341,7 +341,7 @@ def split_case_days(case_day_keys: List[str], val_ratio: float = 0.2, seed: int 
 # -------------------------
 @dataclass
 class TrainCfg:
-    data_root: str = "./input/uw-madison-gi-tract-image-segmentation"
+    data_root: str = "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs"
     out: str = "./checkpoints/best.pt"
     run_dir: str = ""
     resume_from: str = ""  # path to a checkpoint like .../last.pt
@@ -795,7 +795,7 @@ if __name__ == "__main__":
     import argparse
 
     p = argparse.ArgumentParser()
-    p.add_argument("--data_root", type=str, default="./input/uw-madison-gi-tract-image-segmentation")
+    p.add_argument("--data_root", type=str, default="/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs")
     p.add_argument("--out", type=str, default="./checkpoints/best.pt")
     p.add_argument("--run_dir", type=str, default="")
     p.add_argument("--epochs", type=int, default=30)

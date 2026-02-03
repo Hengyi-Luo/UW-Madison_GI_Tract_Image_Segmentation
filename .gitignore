@@ -1,4 +1,4 @@
-/input
+/inputs
 /checkpoints
 /outputs
 mlruns/
@@ -13,3 +13,6 @@ tmp*.ipynb
 .ipynb_checkpoints/
 kaggle_weights/
 fork-of-best-public-kernel-ef10e0.ipynb
+
+# Datasets / archives
+uw-madison-gi-tract-image-segmentation.zip

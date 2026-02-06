@@ -28,14 +28,9 @@ from monai.networks.layers import Norm
 from monai.networks.nets import Unet
 from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, ScaleIntensityd, SpatialPadd
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SRC_DIR = os.path.join(REPO_ROOT, "src")
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
-
-from constants import CLASSES  # noqa: E402
-from data_utils import build_case_day_slices, build_rle_index, load_case_days  # noqa: E402
-from datasets import LoadCaseDayVolumed  # noqa: E402
+from src.constants import CLASSES  # noqa: E402
+from src.data_utils import build_case_day_slices, build_rle_index, load_case_days  # noqa: E402
+from src.datasets import LoadCaseDayVolumed  # noqa: E402
 
 
 def _dice_per_class(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -203,7 +198,7 @@ def _plot_case_day_slice_gt_pred(
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     p.add_argument("--data_root", type=str, default="./inputs")
-    p.add_argument("--weights", type=str, default="./run01/best.pt")
+    p.add_argument("--weights", type=str, default="./outputs/best.pt")
     p.add_argument("--val_ids", type=str, default="./inputs/splits/val_case_days.csv")
     p.add_argument("--out_per_case", type=str, default="./outputs/val_eval/eval_per_case.csv")
     p.add_argument("--out_summary", type=str, default="./outputs/val_eval/eval_summary.json")

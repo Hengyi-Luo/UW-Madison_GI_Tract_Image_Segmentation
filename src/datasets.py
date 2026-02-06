@@ -3,9 +3,10 @@ import cv2
 import numpy as np
 import os
 
-from data_utils import parse_scan_filename
-from rle import rle_decode
-from constants import CLASSES, CLASS2IDX
+from .data_utils import parse_scan_filename
+from .rle import rle_decode
+from .constants import CLASSES, CLASS2IDX
+
 
 class LoadCaseDayVolumed(MapTransform):
     def __init__(self, keys, case_day_slices, rle_index):

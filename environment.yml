@@ -1,24 +1,28 @@
 name: base
 channels:
   - defaults
+  - conda-forge
 dependencies:
   - _libgcc_mutex=0.1=main
   - _openmp_mutex=5.1=1_gnu
+  - _python_abi3_support=1.0=hd8ed1ab_2
   - anaconda-anon-usage=0.7.5=pyhb46e38b_100
   - anaconda-auth=0.12.3=py313h06a4308_0
   - anaconda-cli-base=0.7.0=py313h06a4308_0
   - annotated-types=0.6.0=py313h06a4308_1
   - archspec=0.2.5=pyhd3eb1b0_0
+  - asttokens=3.0.1=pyhd8ed1ab_0
   - boltons=25.0.0=py313h06a4308_0
   - brotlicffi=1.2.0.0=py313h7354ed3_0
   - bzip2=1.0.8=h5eee18b_6
   - c-ares=1.34.5=hef5626c_0
-  - ca-certificates=2025.12.2=h06a4308_0
-  - certifi=2025.11.12=py313h06a4308_0
+  - ca-certificates=2026.1.4=hbd8a1cb_0
+  - certifi=2026.1.4=pyhd8ed1ab_0
   - cffi=2.0.0=py313h4eded50_1
   - charset-normalizer=3.4.4=py313h06a4308_0
   - click=8.2.1=py313h06a4308_1
-  - conda=25.11.1=py313h06a4308_0
+  - comm=0.2.3=pyhe01879c_0
+  - conda=26.1.0=py313h78bf25f_0
   - conda-anaconda-telemetry=0.3.0=pyhd3eb1b0_1
   - conda-anaconda-tos=0.2.2=py313h06a4308_1
   - conda-content-trust=0.2.0=py313h06a4308_1
@@ -26,31 +30,47 @@ dependencies:
   - conda-package-handling=2.4.0=py313h06a4308_1
   - conda-package-streaming=0.12.0=py313h06a4308_1
   - cpp-expected=1.1.0=hdb19cb5_0
+  - cpython=3.13.12=py313hd8ed1ab_100
   - cryptography=46.0.3=py313h0a354b3_0
   - dbus=1.16.2=h5bd4931_0
+  - debugpy=1.8.20=py313h5d5ffb9_0
+  - decorator=5.2.1=pyhd8ed1ab_0
   - distro=1.9.0=py313h06a4308_0
+  - executing=2.2.1=pyhd8ed1ab_0
   - expat=2.7.3=h7354ed3_4
   - fmt=11.2.0=hca5f364_0
   - frozendict=2.4.6=py313hee96239_0
   - gettext=0.21.0=hedfda30_2
   - icu=73.1=h6a678d5_0
   - idna=3.11=py313h06a4308_0
+  - ipykernel=7.2.0=pyha191276_0
+  - ipython=9.10.0=pyh53cf698_0
+  - ipython_pygments_lexers=1.1.1=pyhd8ed1ab_0
   - jansson=2.14=h5eee18b_1
   - jaraco.classes=3.4.0=py313h06a4308_0
   - jaraco.context=6.0.0=py313h06a4308_0
   - jaraco.functools=4.1.0=py313h06a4308_0
+  - jedi=0.19.2=pyhd8ed1ab_1
   - jeepney=0.7.1=pyhd3eb1b0_0
   - jsonpatch=1.33=py313h06a4308_1
   - jsonpointer=3.0.0=py313h06a4308_0
+  - jupyter_client=8.8.0=pyhcf101f3_0
+  - jupyter_core=5.9.1=pyhc90fa1f_0
   - keyring=25.7.0=py313h06a4308_0
+  - keyutils=1.6.3=hb9d3cd8_0
+  - krb5=1.21.3=h659f571_0
   - ld_impl_linux-64=2.44=h153f514_2
   - libarchive=3.8.2=h3ec8f01_0
   - libcurl=8.16.0=heebcbe5_0
+  - libedit=3.1.20250104=pl5321h7949ede_0
   - libev=4.33=h7f8727e_1
   - libexpat=2.7.3=h7354ed3_4
   - libffi=3.4.4=h6a678d5_1
   - libgcc=15.2.0=h69a1729_7
   - libgcc-ng=15.2.0=h166f726_7
+  - libgl=1.7.0=ha4b6fd6_2
+  - libglvnd=1.7.0=ha4b6fd6_2
+  - libglx=1.7.0=ha4b6fd6_2
   - libgomp=15.2.0=h4751f2c_7
   - libiconv=1.16=h5eee18b_3
   - libidn2=2.3.8=hf80d704_0
@@ -58,6 +78,7 @@ dependencies:
   - libmambapy=2.3.2=py313h3f77f5b_1
   - libmpdec=4.0.0=h5eee18b_0
   - libnghttp2=1.67.1=h697f920_0
+  - libsodium=1.0.20=h4ab18f5_0
   - libsolv=0.7.30=h6f1ccf3_2
   - libssh2=1.11.1=h251f7ec_0
   - libstdcxx=15.2.0=h39759b7_7
@@ -69,20 +90,28 @@ dependencies:
   - libzlib=1.3.1=hb25bd0a_0
   - lz4-c=1.9.4=h6a678d5_1
   - markdown-it-py=4.0.0=py313h06a4308_0
+  - matplotlib-inline=0.2.1=pyhd8ed1ab_0
   - mdurl=0.1.2=py313h06a4308_0
   - menuinst=2.4.2=py313h06a4308_1
   - more-itertools=10.8.0=py313h06a4308_0
   - msgpack-python=1.1.1=py313h6a678d5_0
   - ncurses=6.5=h7934f7d_0
+  - nest-asyncio=1.6.0=pyhd8ed1ab_1
   - nlohmann_json=3.11.2=h6a678d5_0
-  - openssl=3.0.18=hd6dcaed_0
+  - openssl=3.6.1=h35e630c_1
   - packaging=25.0=py313h06a4308_1
+  - parso=0.8.5=pyhcf101f3_0
   - pcre2=10.46=hf426167_0
+  - pexpect=4.9.0=pyhd8ed1ab_1
   - pip=25.3=pyhc872135_0
   - pkce=1.0.3=py313h06a4308_0
   - platformdirs=4.5.0=py313h06a4308_0
   - pluggy=1.5.0=py313h06a4308_0
+  - prompt-toolkit=3.0.52=pyha770c72_0
+  - psutil=7.2.2=py313h54dd161_0
   - pthread-stubs=0.3=h0ce48e5_1
+  - ptyprocess=0.7.0=pyhd8ed1ab_1
+  - pure_eval=0.2.3=pyhd8ed1ab_1
   - pybind11-abi=5=hd3eb1b0_0
   - pycosat=0.6.6=py313h5eee18b_2
   - pycparser=2.23=py313h06a4308_0
@@ -93,8 +122,11 @@ dependencies:
   - pyjwt=2.10.1=py313h06a4308_1
   - pysocks=1.7.1=py313h06a4308_1
   - python=3.13.11=hcf712cf_100_cp313
+  - python-dateutil=2.9.0.post0=pyhe01879c_2
   - python-dotenv=1.1.0=py313h06a4308_0
+  - python-gil=3.13.12=h4df99d1_100
   - python_abi=3.13=3_cp313
+  - pyzmq=27.1.0=py312hfb55c3c_0
   - readchar=4.2.1=py313h06a4308_0
   - readline=8.3=hc2a1206_0
   - reproc=14.2.4=h6a678d5_2
@@ -108,10 +140,14 @@ dependencies:
   - setuptools=80.9.0=py313h06a4308_0
   - shellingham=1.5.4=py313h06a4308_0
   - simdjson=3.10.1=hdb19cb5_0
+  - six=1.17.0=pyhe01879c_1
   - sqlite=3.51.0=h2a70700_0
+  - stack_data=0.6.3=pyhd8ed1ab_1
   - tk=8.6.15=h54e0aa7_0
   - tomli=2.2.1=py313h06a4308_0
+  - tornado=6.5.4=py313hd02dea0_0
   - tqdm=4.67.1=py313h7040dfc_1
+  - traitlets=5.14.3=pyhd8ed1ab_1
   - truststore=0.10.1=py313h06a4308_1
   - typer=0.20.0=py313h06a4308_0
   - typer-slim=0.20.0=py313h06a4308_0
@@ -121,6 +157,7 @@ dependencies:
   - typing_extensions=4.15.0=py313h06a4308_0
   - tzdata=2025b=h04d1e81_0
   - urllib3=2.6.1=py313h06a4308_0
+  - wcwidth=0.5.3=pyhd8ed1ab_0
   - wheel=0.45.1=py313h06a4308_0
   - xorg-libx11=1.8.12=h9b100fa_1
   - xorg-libxau=1.0.12=h9b100fa_0
@@ -128,6 +165,7 @@ dependencies:
   - xorg-xorgproto=2024.1=h5eee18b_1
   - xz=5.6.4=h5eee18b_1
   - yaml-cpp=0.8.0=h6a678d5_1
+  - zeromq=4.3.5=h387f397_9
   - zlib=1.3.1=hb25bd0a_0
   - zstandard=0.24.0=py313h3d778a8_0
   - zstd=1.5.7=h11fc155_0
@@ -137,9 +175,12 @@ dependencies:
       - anyio==4.12.1
       - black==26.1.0
       - bleach==6.3.0
+      - contourpy==1.3.3
       - cuda-bindings==12.9.4
       - cuda-pathfinder==1.3.3
+      - cycler==0.12.1
       - filelock==3.20.3
+      - fonttools==4.61.1
       - fsspec==2026.1.0
       - grpcio==1.76.0
       - h11==0.16.0
@@ -148,11 +189,14 @@ dependencies:
       - httpx==0.28.1
       - huggingface-hub==1.3.7
       - jinja2==3.1.6
+      - joblib==1.5.3
       - kaggle==1.8.3
       - kagglesdk==0.1.15
+      - kiwisolver==1.4.9
       - librt==0.7.8
       - markdown==3.10.1
       - markupsafe==3.0.3
+      - matplotlib==3.10.8
       - monai==1.5.2
       - mpmath==1.3.0
       - mypy==1.19.1
@@ -179,17 +223,18 @@ dependencies:
       - pathspec==1.0.4
       - pillow==12.1.0
       - protobuf==6.33.5
-      - psutil==7.2.2
-      - python-dateutil==2.9.0.post0
+      - pyparsing==3.3.2
       - python-slugify==8.0.4
       - pytokens==0.4.1
       - pyyaml==6.0.3
       - safetensors==0.7.0
-      - six==1.17.0
+      - scikit-learn==1.8.0
+      - scipy==1.17.0
       - sympy==1.14.0
       - tensorboard==2.20.0
       - tensorboard-data-server==0.7.2
       - text-unidecode==1.3
+      - threadpoolctl==3.6.0
       - torch==2.10.0
       - triton==3.6.0
       - types-requests==2.32.4.20260107

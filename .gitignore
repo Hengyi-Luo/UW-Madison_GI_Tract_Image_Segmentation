@@ -14,5 +14,7 @@ tmp*.ipynb
 kaggle_weights/
 fork-of-best-public-kernel-ef10e0.ipynb
 
+/notes/
+
 # Datasets / archives
 uw-madison-gi-tract-image-segmentation.zip

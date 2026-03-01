@@ -19,12 +19,12 @@ pip install torch monai opencv-python pandas numpy pyyaml accelerate tensorboard
 
 Edit `configs/train_unet3d.yaml`, then:
 ```bash
-bash scripts/run_train.sh configs/train_unet3d.yaml
+python scripts/train_unet3d.py --config configs/train_unet3d.yaml
 ```
 
 Which config is used?
-- `bash scripts/run_train.sh <CONFIG>.yaml` uses the YAML you pass in.
-- If you run `bash scripts/run_train.sh` without args, it defaults to `configs/train_unet3d.yaml`.
+- `python scripts/train_unet3d.py --config <CONFIG>.yaml` uses the YAML you pass in.
+- If you run `python scripts/train_unet3d.py` without args, it defaults to `configs/train_unet3d.yaml`.
 
 Notes:
 - Default model is `swin_unetr`. For SwinUNETR, `patch_d/patch_h/patch_w` should be divisible by 32.

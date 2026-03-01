@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+
+from pathlib import Path
+import os
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+os.chdir(REPO_ROOT)
+
 from __future__ import annotations
 
 import argparse
@@ -208,6 +215,53 @@ def _batch_to_device(batch: dict[str, Any], device: torch.device) -> tuple[torch
     return images, labels
 
 
+def _to_case_day(x: Any) -> str:
+    if isinstance(x, str):
+        return x
+    if isinstance(x, (list, tuple)) and x and isinstance(x[0], str):
+        return x[0]
+    if torch.is_tensor(x) and x.numel() == 1:
+        try:
+            return str(x.item())
+        except Exception:
+            return str(x)
+    return str(x)
+
+
+def _overlay_masks_rgb(
+    image2d: torch.Tensor,
+    masks: torch.Tensor,
+    *,
+    alpha: float = 0.5,
+    colors: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    image2d: (H,W) float in [0,1]
+    masks: (C,H,W) float/bool in {0,1}
+    returns: (3,H,W) float in [0,1]
+    """
+    if image2d.ndim != 2:
+        raise ValueError(f"Expected image2d (H,W), got shape={tuple(image2d.shape)}")
+    if masks.ndim != 3:
+        raise ValueError(f"Expected masks (C,H,W), got shape={tuple(masks.shape)}")
+
+    base = image2d.clamp(0, 1).unsqueeze(0).repeat(3, 1, 1)
+    c = int(masks.shape[0])
+    if colors is None:
+        if c != 3:
+            colors = torch.eye(3, dtype=base.dtype, device=base.device)[:c]
+        else:
+            colors = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=base.dtype, device=base.device)
+    colors = colors.to(dtype=base.dtype, device=base.device)
+
+    out = base
+    for i in range(min(c, int(colors.shape[0]))):
+        m = masks[i].float().clamp(0, 1).unsqueeze(0)
+        col = colors[i].view(3, 1, 1)
+        out = out * (1.0 - alpha * m) + col * (alpha * m)
+    return out.clamp(0, 1)
+
+
 def train_one_epoch(
     *,
     model: torch.nn.Module,
@@ -276,10 +330,12 @@ def compute_sw_dice(
     sw_batch_size: int,
     sw_overlap: float,
     threshold: float = 0.5,
-) -> tuple[torch.Tensor, float, float]:
+    vis_case_day_to_slices: dict[str, list[int]] | None = None,
+) -> tuple[torch.Tensor, float, float, list[tuple[str, torch.Tensor]]]:
     model.eval()
     device = accelerator.device
     total_loss = 0.0
+    vis_images: list[tuple[str, torch.Tensor]] = []
 
     for batch in data_loader:
         images, labels = _batch_to_device(batch, device)
@@ -298,10 +354,34 @@ def compute_sw_dice(
         preds = (probs > float(threshold)).float()
         dice_metric(y_pred=preds, y=labels)
 
+        if vis_case_day_to_slices:
+            case_day = _to_case_day(batch.get("case_day", ""))
+            slice_positions = vis_case_day_to_slices.get(case_day)
+            if slice_positions:
+                img_vol = images[0, 0].detach()
+                gt_vol = labels[0].detach()
+                pred_vol = preds[0].detach()
+
+                for slice_pos in slice_positions:
+                    if slice_pos < 0 or slice_pos >= int(img_vol.shape[0]):
+                        continue
+                    img2d = img_vol[int(slice_pos)]
+                    gt2d = gt_vol[:, int(slice_pos)]
+                    pred2d = pred_vol[:, int(slice_pos)]
+
+                    raw = img2d.clamp(0, 1).unsqueeze(0).repeat(3, 1, 1)
+                    vis_images.append((f"val_vis/{case_day}/slice_{int(slice_pos):03d}/raw", raw))
+                    vis_images.append(
+                        (f"val_vis/{case_day}/slice_{int(slice_pos):03d}/gt", _overlay_masks_rgb(img2d, gt2d))
+                    )
+                    vis_images.append(
+                        (f"val_vis/{case_day}/slice_{int(slice_pos):03d}/pred", _overlay_masks_rgb(img2d, pred2d))
+                    )
+
     dice_per_class = dice_metric.aggregate()
     dice_mean = float(dice_per_class.mean().item())
     n = max(1, len(data_loader))
-    return dice_per_class, dice_mean, total_loss / n
+    return dice_per_class, dice_mean, total_loss / n, vis_images
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -350,6 +430,7 @@ def main() -> None:
         logger.info("Validation visualization samples: %d", n_vis)
     except Exception as e:
         logger.info("val_vis_samples not loaded (%s): %s", cfg.val_vis_samples, str(e))
+        vis_samples = None
 
     train_transforms, val_transforms = _build_transforms(cfg=cfg, case_day_slices=case_day_slices, rle_index=rle_index)
 
@@ -438,6 +519,22 @@ def main() -> None:
             t_val = time.time()
             model.eval()
 
+            do_vis = bool(cfg.val_vis_every) and (epoch % int(cfg.val_vis_every) == 0) and bool(vis_samples)
+            vis_case_day_to_slices: dict[str, list[int]] | None = None
+            if do_vis:
+                vis_case_day_to_slices = {}
+                for s in (vis_samples or {}).get("samples", []):
+                    cd = str(s.get("case_day") or "").strip()
+                    if not cd:
+                        continue
+                    try:
+                        sp = int(s.get("slice_pos", -1))
+                    except Exception:
+                        sp = -1
+                    if sp < 0:
+                        continue
+                    vis_case_day_to_slices.setdefault(cd, []).append(sp)
+
             dice_metric.reset()
             train_patch_dice_per_class, train_patch_dice_mean = compute_patch_dice(
                 model=model,
@@ -446,7 +543,7 @@ def main() -> None:
                 dice_metric=dice_metric,
             )
             dice_metric.reset()
-            val_sw_dice_per_class, val_sw_dice_mean, val_sw_loss = compute_sw_dice(
+            val_sw_dice_per_class, val_sw_dice_mean, val_sw_loss, vis_images = compute_sw_dice(
                 model=model,
                 data_loader=val_loader,
                 accelerator=accelerator,
@@ -455,6 +552,7 @@ def main() -> None:
                 roi_size=cfg.patch_size,
                 sw_batch_size=int(cfg.sw_batch_size),
                 sw_overlap=float(cfg.sw_overlap),
+                vis_case_day_to_slices=vis_case_day_to_slices,
             )
             dice_metric.reset()
             val_time = time.time() - t_val
@@ -475,6 +573,10 @@ def main() -> None:
             for i, cls_name in enumerate(CLASSES):
                 writer.add_scalar(f"train/dice_patch_{cls_name}", float(train_patch_dice_per_class[i].item()), epoch)
                 writer.add_scalar(f"val/dice_sw_{cls_name}", float(val_sw_dice_per_class[i].item()), epoch)
+
+            if do_vis and vis_images:
+                for tag, img in vis_images:
+                    writer.add_image(tag, img.detach().cpu(), epoch, dataformats="CHW")
 
             if float(val_sw_dice_mean) > float(best_metric):
                 best_metric = float(val_sw_dice_mean)

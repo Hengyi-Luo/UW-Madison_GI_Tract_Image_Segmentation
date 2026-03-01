@@ -17,14 +17,14 @@ pip install torch monai opencv-python pandas numpy pyyaml accelerate tensorboard
 
 ## Training
 
-Edit `configs/train.yaml` (set `run_dir`), then:
+Edit `configs/train_unet3d.yaml`, then:
 ```bash
-bash scripts/run_train.sh configs/train.yaml --mlflow_run_name 3dunet-baseline
+bash scripts/run_train.sh configs/train_unet3d.yaml
 ```
 
 Which config is used?
 - `bash scripts/run_train.sh <CONFIG>.yaml` uses the YAML you pass in.
-- If you run `bash scripts/run_train.sh` without args, it defaults to `configs/train.yaml`.
+- If you run `bash scripts/run_train.sh` without args, it defaults to `configs/train_unet3d.yaml`.
 
 Notes:
 - Default model is `swin_unetr`. For SwinUNETR, `patch_d/patch_h/patch_w` should be divisible by 32.
@@ -86,3 +86,6 @@ For GT vs prediction visualization, see `uwgi.viz.plot_case_day_slice_gt_pred`.
 
 
 mlflow ui --backend-store-uri sqlite:///$(pwd)/mlflow.db --host 0.0.0.0 --port 5000
+
+eval "$(ssh-agent -s)"
+ssh-add /home/ubuntu/.ssh/id_ed25519_github

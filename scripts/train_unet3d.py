@@ -32,11 +32,10 @@ from src.datasets import LoadCaseDayVolumed
 @dataclass(frozen=True)
 class TrainCfg:
     # data
-    data_root: str = "./inputs"
-    train_ids: str = "./inputs/splits/train_case_days.csv"
-    val_ids: str = "./inputs/splits/val_case_days.csv"
+    data_root: str = "inputs"
+    train_ids: str = "inputs/splits/train_case_days.csv"
+    val_ids: str = "inputs/splits/val_case_days.csv"
     num_workers: int = 6
-    scan_read_mode: str = "unchanged"  # unchanged | legacy_uint8
     seed: int = 42
 
     # checkpointing
@@ -44,7 +43,7 @@ class TrainCfg:
     resume_from: str = ""
 
     # model
-    model_name: str = "Unet3D"
+    model_name: str = "Unet3D_IMREAD_UNCHANGED"
     spatial_dims: int = 3
     in_channels: int = 1
     out_channels: int = len(CLASSES)
@@ -77,7 +76,7 @@ class TrainCfg:
 
     # visualization samples metadata (loaded but not used by this script yet)
     val_vis_every: int = 5
-    val_vis_samples: str = "./inputs/splits/val_vis_samples.json"
+    val_vis_samples: str = "inputs/splits/val_vis_samples.json"
 
     # caching
     train_cache_rate: float = 1.0
@@ -141,7 +140,6 @@ def _build_transforms(*, cfg: TrainCfg, case_day_slices, rle_index):
             keys=["case_day"],
             case_day_slices=case_day_slices,
             rle_index=rle_index,
-            scan_read_mode=str(cfg.scan_read_mode),
         ),
         EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
         ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
@@ -491,7 +489,6 @@ def main() -> None:
                         "best_metric": float(best_metric),
                         "best_metric_epoch": int(best_metric_epoch),
                         "dice_per_class": val_sw_dice_per_class.detach().cpu().numpy(),
-                        "scan_read_mode": str(cfg.scan_read_mode),
                     },
                     str(out_dir / "best.pt"),
                 )
@@ -506,7 +503,6 @@ def main() -> None:
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_metric": float(best_metric),
                 "best_metric_epoch": int(best_metric_epoch),
-                "scan_read_mode": str(cfg.scan_read_mode),
             },
             str(out_dir / "last.pt"),
         )

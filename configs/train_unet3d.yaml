@@ -1,12 +1,7 @@
-data_root: ./inputs
-train_ids: ./inputs/splits/train_case_days.csv
-val_ids: ./inputs/splits/val_case_days.csv
+data_root: inputs
+train_ids: inputs/splits/train_case_days.csv
+val_ids: inputs/splits/val_case_days.csv
 num_workers: 6
-
-# Input intensity compatibility:
-# - unchanged: preserve original PNG bit depth (recommended for new training)
-# - legacy_uint8: match older models that effectively used uint8 (img16 >> 8)
-scan_read_mode: unchanged
 
 seed: 42
 
@@ -46,4 +41,3 @@ val_cache_rate: 1.0
 # If empty, an output dir is created under outputs/ with a timestamp prefix.
 output_dir: ""
 resume_from: ""
-

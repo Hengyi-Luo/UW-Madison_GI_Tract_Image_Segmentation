@@ -9,27 +9,18 @@ from .constants import CLASSES, CLASS2IDX
 
 
 class LoadCaseDayVolumed(MapTransform):
-    def __init__(self, keys, case_day_slices, rle_index, scan_read_mode: str = "unchanged"):
+    def __init__(self, keys, case_day_slices, rle_index):
         super().__init__(keys)
         self.case_day_slices = case_day_slices
         self.rle_index = rle_index
-        self.scan_read_mode = str(scan_read_mode)
 
-    def _read_scan(self, path: str) -> np.ndarray:
+    @staticmethod
+    def _read_scan(path: str) -> np.ndarray:
         img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if img is None:
             raise RuntimeError(f"Failed to read scan: {path}")
         if img.ndim == 3:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        if self.scan_read_mode == "legacy_uint8":
-            if img.dtype == np.uint16:
-                img = (img >> 8).astype(np.uint8, copy=False)
-            elif img.dtype != np.uint8:
-                img = np.clip(img, 0, 255).astype(np.uint8, copy=False)
-        elif self.scan_read_mode != "unchanged":
-            raise ValueError(
-                f"Unknown scan_read_mode={self.scan_read_mode!r}; expected 'unchanged' or 'legacy_uint8'."
-            )
         return img
 
     def __call__(self, data):

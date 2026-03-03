@@ -1,0 +1,37 @@
+data_root: inputs
+
+# Which case_days to run inference on (same format as inputs/splits/*_case_days.csv).
+ids_csv: inputs/splits/train_case_days.csv
+
+# Path to model checkpoint (e.g., outputs/<run>/best.pt)
+weights: outputs/20260301-002909_Unet3D_IMREAD_UNCHANGED/best.pt
+
+# Needed for evaluation (Dice). Used only when evaluate=true.
+train_csv: inputs/train.csv
+
+# If empty, defaults to: <weights_parent>/infer
+output_dir: ""
+
+# Output CSV name under output_dir
+out_csv_name: submit.csv
+
+# Also write case_day-level eval files (Dice) under output_dir.
+evaluate: true
+eval_per_case_name: eval_per_case.csv
+eval_summary_name: eval_summary.json
+
+# Sliding window inference
+roi_d: 96
+roi_h: 224
+roi_w: 224
+sw_batch_size: 4
+overlap: 0.25
+threshold: 0.5
+
+num_workers: 0
+
+# If empty, auto-selects cuda if available.
+device: ""
+
+# Keep false unless you trust the checkpoint source.
+unsafe_load: false

@@ -1,0 +1,265 @@
+{
+  "criteria": {
+    "min_classes": 3,
+    "min_area": 1
+  },
+  "n_requested": 16,
+  "samples": [
+    {
+      "case": "case55",
+      "case_day": "case55_day0",
+      "slice_idx": 78,
+      "slice_pos": 77,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case55/case55_day0/scans/slice_0078_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 2354,
+      "areas": {
+        "large_bowel": 576,
+        "small_bowel": 465,
+        "stomach": 1313
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case35",
+      "case_day": "case35_day12",
+      "slice_idx": 51,
+      "slice_pos": 50,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case35/case35_day12/scans/slice_0051_276_276_1.63_1.63.png",
+      "present_classes": 3,
+      "total_area": 1526,
+      "areas": {
+        "large_bowel": 564,
+        "small_bowel": 194,
+        "stomach": 768
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case32",
+      "case_day": "case32_day18",
+      "slice_idx": 107,
+      "slice_pos": 106,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case32/case32_day18/scans/slice_0107_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 3321,
+      "areas": {
+        "large_bowel": 1605,
+        "small_bowel": 1389,
+        "stomach": 327
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case49",
+      "case_day": "case49_day15",
+      "slice_idx": 63,
+      "slice_pos": 62,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case49/case49_day15/scans/slice_0063_360_310_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 5307,
+      "areas": {
+        "large_bowel": 1882,
+        "small_bowel": 176,
+        "stomach": 3249
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case40",
+      "case_day": "case40_day17",
+      "slice_idx": 96,
+      "slice_pos": 95,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case40/case40_day17/scans/slice_0096_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 2530,
+      "areas": {
+        "large_bowel": 530,
+        "small_bowel": 1409,
+        "stomach": 591
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case107",
+      "case_day": "case107_day19",
+      "slice_idx": 67,
+      "slice_pos": 66,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case107/case107_day19/scans/slice_0067_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 4522,
+      "areas": {
+        "large_bowel": 820,
+        "small_bowel": 82,
+        "stomach": 3620
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case90",
+      "case_day": "case90_day29",
+      "slice_idx": 102,
+      "slice_pos": 101,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case90/case90_day29/scans/slice_0102_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 3947,
+      "areas": {
+        "large_bowel": 2454,
+        "small_bowel": 1323,
+        "stomach": 170
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case156",
+      "case_day": "case156_day0",
+      "slice_idx": 76,
+      "slice_pos": 75,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case156/case156_day0/scans/slice_0076_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 2175,
+      "areas": {
+        "large_bowel": 599,
+        "small_bowel": 272,
+        "stomach": 1304
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case124",
+      "case_day": "case124_day20",
+      "slice_idx": 81,
+      "slice_pos": 80,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case124/case124_day20/scans/slice_0081_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 1790,
+      "areas": {
+        "large_bowel": 1083,
+        "small_bowel": 231,
+        "stomach": 476
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case123",
+      "case_day": "case123_day20",
+      "slice_idx": 93,
+      "slice_pos": 92,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case123/case123_day20/scans/slice_0093_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 2901,
+      "areas": {
+        "large_bowel": 637,
+        "small_bowel": 1305,
+        "stomach": 959
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case131",
+      "case_day": "case131_day0",
+      "slice_idx": 77,
+      "slice_pos": 76,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case131/case131_day0/scans/slice_0077_360_310_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 2727,
+      "areas": {
+        "large_bowel": 485,
+        "small_bowel": 1540,
+        "stomach": 702
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case147",
+      "case_day": "case147_day14",
+      "slice_idx": 83,
+      "slice_pos": 82,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case147/case147_day14/scans/slice_0083_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 3570,
+      "areas": {
+        "large_bowel": 1666,
+        "small_bowel": 792,
+        "stomach": 1112
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case134",
+      "case_day": "case134_day22",
+      "slice_idx": 58,
+      "slice_pos": 57,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case134/case134_day22/scans/slice_0058_360_310_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 7368,
+      "areas": {
+        "large_bowel": 5211,
+        "small_bowel": 1076,
+        "stomach": 1081
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case124",
+      "case_day": "case124_day20",
+      "slice_idx": 91,
+      "slice_pos": 90,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case124/case124_day20/scans/slice_0091_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 3091,
+      "areas": {
+        "large_bowel": 1544,
+        "small_bowel": 1136,
+        "stomach": 411
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case36",
+      "case_day": "case36_day6",
+      "slice_idx": 61,
+      "slice_pos": 60,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case36/case36_day6/scans/slice_0061_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 453,
+      "areas": {
+        "large_bowel": 233,
+        "small_bowel": 173,
+        "stomach": 47
+      },
+      "min_area": 1,
+      "min_classes": 3
+    },
+    {
+      "case": "case143",
+      "case_day": "case143_day0",
+      "slice_idx": 93,
+      "slice_pos": 92,
+      "slice_path": "./input/uw-madison-gi-tract-image-segmentation/train/case143/case143_day0/scans/slice_0093_266_266_1.50_1.50.png",
+      "present_classes": 3,
+      "total_area": 2002,
+      "areas": {
+        "large_bowel": 1222,
+        "small_bowel": 689,
+        "stomach": 91
+      },
+      "min_area": 1,
+      "min_classes": 3
+    }
+  ]
+}

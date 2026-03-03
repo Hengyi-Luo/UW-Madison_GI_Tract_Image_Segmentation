@@ -1,0 +1,17 @@
+case,case_day,slice_idx,slice_pos,slice_path,present_classes,total_area,min_area,min_classes
+case55,case55_day0,78,77,./input/uw-madison-gi-tract-image-segmentation/train/case55/case55_day0/scans/slice_0078_266_266_1.50_1.50.png,3,2354,1,3
+case35,case35_day12,51,50,./input/uw-madison-gi-tract-image-segmentation/train/case35/case35_day12/scans/slice_0051_276_276_1.63_1.63.png,3,1526,1,3
+case32,case32_day18,107,106,./input/uw-madison-gi-tract-image-segmentation/train/case32/case32_day18/scans/slice_0107_266_266_1.50_1.50.png,3,3321,1,3
+case49,case49_day15,63,62,./input/uw-madison-gi-tract-image-segmentation/train/case49/case49_day15/scans/slice_0063_360_310_1.50_1.50.png,3,5307,1,3
+case40,case40_day17,96,95,./input/uw-madison-gi-tract-image-segmentation/train/case40/case40_day17/scans/slice_0096_266_266_1.50_1.50.png,3,2530,1,3
+case107,case107_day19,67,66,./input/uw-madison-gi-tract-image-segmentation/train/case107/case107_day19/scans/slice_0067_266_266_1.50_1.50.png,3,4522,1,3
+case90,case90_day29,102,101,./input/uw-madison-gi-tract-image-segmentation/train/case90/case90_day29/scans/slice_0102_266_266_1.50_1.50.png,3,3947,1,3
+case156,case156_day0,76,75,./input/uw-madison-gi-tract-image-segmentation/train/case156/case156_day0/scans/slice_0076_266_266_1.50_1.50.png,3,2175,1,3
+case124,case124_day20,81,80,./input/uw-madison-gi-tract-image-segmentation/train/case124/case124_day20/scans/slice_0081_266_266_1.50_1.50.png,3,1790,1,3
+case123,case123_day20,93,92,./input/uw-madison-gi-tract-image-segmentation/train/case123/case123_day20/scans/slice_0093_266_266_1.50_1.50.png,3,2901,1,3
+case131,case131_day0,77,76,./input/uw-madison-gi-tract-image-segmentation/train/case131/case131_day0/scans/slice_0077_360_310_1.50_1.50.png,3,2727,1,3
+case147,case147_day14,83,82,./input/uw-madison-gi-tract-image-segmentation/train/case147/case147_day14/scans/slice_0083_266_266_1.50_1.50.png,3,3570,1,3
+case134,case134_day22,58,57,./input/uw-madison-gi-tract-image-segmentation/train/case134/case134_day22/scans/slice_0058_360_310_1.50_1.50.png,3,7368,1,3
+case124,case124_day20,91,90,./input/uw-madison-gi-tract-image-segmentation/train/case124/case124_day20/scans/slice_0091_266_266_1.50_1.50.png,3,3091,1,3
+case36,case36_day6,61,60,./input/uw-madison-gi-tract-image-segmentation/train/case36/case36_day6/scans/slice_0061_266_266_1.50_1.50.png,3,453,1,3
+case143,case143_day0,93,92,./input/uw-madison-gi-tract-image-segmentation/train/case143/case143_day0/scans/slice_0093_266_266_1.50_1.50.png,3,2002,1,3

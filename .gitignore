@@ -18,3 +18,8 @@ fork-of-best-public-kernel-ef10e0.ipynb
 
 # Datasets / archives
 uw-madison-gi-tract-image-segmentation.zip
+
+# Keep only minimal configs tracked
+/configs/*.yaml
+!/configs/train_unet3d.yaml
+!/configs/infer_unet3d.yaml

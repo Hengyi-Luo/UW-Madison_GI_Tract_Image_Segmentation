@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 
-from pathlib import Path
 import os
+import sys
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 os.chdir(REPO_ROOT)
 
-from __future__ import annotations
 
 import argparse
 import json
 import logging
-import os
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -34,6 +35,11 @@ from torch.utils.tensorboard import SummaryWriter
 from src.constants import CLASSES
 from src.data_utils import build_case_day_slices, build_rle_index, load_case_days, load_val_vis_samples
 from src.datasets import LoadCaseDayVolumed
+
+try:
+    import pynvml  # type: ignore
+except Exception:  # pragma: no cover
+    pynvml = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +168,42 @@ def _build_transforms(*, cfg: TrainCfg, case_day_slices, rle_index):
     )
     val_transforms = Compose([*common, EnsureTyped(keys=["image", "label"])])
     return train_transforms, val_transforms
+
+
+def _pad_collate_keep_slice_idxs(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pad-collate tensors but keep variable-length slice_idxs as a list."""
+    slice_idxs = [item.get("slice_idxs") for item in batch]
+    batch_no_idxs: list[dict[str, Any]] = []
+    for item in batch:
+        item = dict(item)
+        item.pop("slice_idxs", None)
+        batch_no_idxs.append(item)
+    collated = pad_list_data_collate(batch_no_idxs)
+    collated["slice_idxs"] = slice_idxs
+    return collated
+
+
+def _read_gpu_stats() -> dict[str, float]:
+    """Return GPU utilization and memory stats via NVML, or empty if unavailable."""
+    if pynvml is None:
+        return {}
+    try:
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return {
+            "gpu_utilization_pct": float(util.gpu),
+            "gpu_mem_utilization_pct": float(util.memory),
+            "gpu_mem_used_mb": float(mem.used) / (1024 * 1024),
+        }
+    except Exception:
+        return {}
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
 
 
 def _build_model(cfg: TrainCfg) -> torch.nn.Module:
@@ -458,7 +500,7 @@ def main() -> None:
         shuffle=True,
         num_workers=int(cfg.num_workers),
         pin_memory=torch.cuda.is_available(),
-        collate_fn=pad_list_data_collate,
+        collate_fn=_pad_collate_keep_slice_idxs,
     )
     val_loader = DataLoader(
         val_ds,
@@ -514,6 +556,27 @@ def main() -> None:
         writer.add_scalar("train/lr", float(current_lr), epoch)
         writer.add_scalar("train/grad_norm", float(epoch_grad_norm), epoch)
         writer.add_scalar("system/train_time_sec", float(train_time), epoch)
+        if torch.cuda.is_available():
+            writer.add_scalar(
+                "system/gpu_mem_allocated_mb",
+                torch.cuda.memory_allocated() / (1024 * 1024),
+                epoch,
+            )
+            writer.add_scalar(
+                "system/gpu_mem_reserved_mb",
+                torch.cuda.memory_reserved() / (1024 * 1024),
+                epoch,
+            )
+            writer.add_scalar(
+                "system/gpu_mem_max_allocated_mb",
+                torch.cuda.max_memory_allocated() / (1024 * 1024),
+                epoch,
+            )
+            gpu_stats = _read_gpu_stats()
+            if gpu_stats:
+                writer.add_scalar("system/gpu_utilization_pct", gpu_stats["gpu_utilization_pct"], epoch)
+                writer.add_scalar("system/gpu_mem_utilization_pct", gpu_stats["gpu_mem_utilization_pct"], epoch)
+                writer.add_scalar("system/gpu_mem_used_mb", gpu_stats["gpu_mem_used_mb"], epoch)
 
         if epoch % int(cfg.val_interval) == 0:
             t_val = time.time()

@@ -118,12 +118,13 @@ Planned improvements (not included in this release). This section is meant as a 
 
 ### Model and inference improvements
 
+
+- Inference / TTA:
+  - test-time augmentation (axis flips / rotations) with ensembling
+  - TTA consistency checks (variance across augmentations) to flag uncertain regions
+  - optional TTA-based consistency filtering to reduce spurious false-positive islands
+  - post-processing: connected-component filtering / anatomy-aware constraints (class-specific size thresholds)
 - Model candidates:
   - MONAI `SwinUNETR`, `DynUNet`, `SegResNet` (or lighter backbones for speed)
   - multi-scale / deep supervision variants
-- Inference:
-  - test-time augmentation (flip/rotate) with consistency ensembling
-  - reduce spurious false-positive islands via connected-component filtering / anatomy-aware constraints
-
-
 

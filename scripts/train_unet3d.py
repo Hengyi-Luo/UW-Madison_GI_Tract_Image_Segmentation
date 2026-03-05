@@ -12,8 +12,11 @@ os.chdir(REPO_ROOT)
 
 
 import argparse
+import hashlib
 import json
 import logging
+import platform
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -54,6 +57,18 @@ class TrainCfg:
     # checkpointing
     output_dir: str = ""
     resume_from: str = ""
+
+    # tracking
+    # If true: enforce clean git worktree and log params/metrics/artifacts to MLflow.
+    use_mlflow: bool = False
+    # When use_mlflow is true:
+    # - allow_dirty_git=false: refuse to start if git worktree is dirty
+    # - allow_dirty_git=true: proceed and (best-effort) log git diff/status to MLflow artifacts
+    allow_dirty_git: bool = False
+    # If empty: use $MLFLOW_EXPERIMENT_NAME or a repo-default.
+    mlflow_experiment: str = ""
+    # If empty: use sqlite:///<repo>/mlflow.db when present, otherwise MLflow default.
+    mlflow_tracking_uri: str = ""
 
     # model
     model_name: str = "Unet3D_IMREAD_UNCHANGED"
@@ -192,10 +207,11 @@ def _read_gpu_stats() -> dict[str, float]:
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         util = pynvml.nvmlDeviceGetUtilizationRates(handle)
         mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        gb = 1024.0 * 1024.0 * 1024.0
         return {
             "gpu_utilization_pct": float(util.gpu),
             "gpu_mem_utilization_pct": float(util.memory),
-            "gpu_mem_used_mb": float(mem.used) / (1024 * 1024),
+            "gpu_mem_used_gb": float(mem.used) / gb,
         }
     except Exception:
         return {}
@@ -204,6 +220,101 @@ def _read_gpu_stats() -> dict[str, float]:
             pynvml.nvmlShutdown()
         except Exception:
             pass
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _run_git(args: list[str]) -> str:
+    out = subprocess.check_output(["git", *args], cwd=str(REPO_ROOT), stderr=subprocess.STDOUT)
+    return out.decode("utf-8", errors="replace").strip()
+
+
+def _git_status_porcelain() -> str:
+    return _run_git(["status", "--porcelain"])
+
+
+def _get_git_info() -> dict[str, str]:
+    info: dict[str, str] = {}
+    try:
+        info["git.commit"] = _run_git(["rev-parse", "HEAD"])
+        info["git.branch"] = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+        info["git.describe"] = _run_git(["describe", "--tags", "--always", "--dirty"])
+        info["git.dirty"] = "true" if bool(_git_status_porcelain().strip()) else "false"
+    except Exception:
+        # Repo may not be a git checkout in some environments.
+        pass
+    return info
+
+
+def _default_mlflow_tracking_uri(cfg: TrainCfg) -> str:
+    if cfg.mlflow_tracking_uri:
+        return str(cfg.mlflow_tracking_uri)
+    env_uri = os.environ.get("MLFLOW_TRACKING_URI", "").strip()
+    if env_uri:
+        return env_uri
+    db_path = REPO_ROOT / "mlflow.db"
+    if db_path.exists():
+        return f"sqlite:///{db_path}"
+    return ""
+
+
+def _default_mlflow_experiment(cfg: TrainCfg) -> str:
+    if cfg.mlflow_experiment:
+        return str(cfg.mlflow_experiment)
+    env_exp = os.environ.get("MLFLOW_EXPERIMENT_NAME", "").strip()
+    if env_exp:
+        return env_exp
+    return "uwgi/segmentation"
+
+
+def _load_mlflow_run_id_from_resume(resume_from: str) -> str:
+    if not resume_from:
+        return ""
+    p = Path(resume_from)
+    run_id_path = p.parent / "mlflow_run_id.txt"
+    if run_id_path.exists():
+        return run_id_path.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _write_mlflow_run_id(out_dir: Path, run_id: str) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "mlflow_run_id.txt").write_text(str(run_id).strip() + "\n", encoding="utf-8")
+
+
+def _get_env_info() -> dict[str, str]:
+    info: dict[str, str] = {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+    }
+    try:
+        info["torch"] = str(torch.__version__)
+        info["cuda.available"] = str(torch.cuda.is_available())
+        info["cuda.version"] = str(torch.version.cuda) if torch.version.cuda else ""
+        info["cudnn.version"] = str(torch.backends.cudnn.version()) if torch.backends.cudnn.is_available() else ""
+        if torch.cuda.is_available():
+            info["gpu.name"] = str(torch.cuda.get_device_name(0))
+    except Exception:
+        pass
+    try:
+        import monai  # type: ignore
+
+        info["monai"] = str(monai.__version__)
+    except Exception:
+        pass
+    try:
+        import accelerate  # type: ignore
+
+        info["accelerate"] = str(accelerate.__version__)
+    except Exception:
+        pass
+    return info
 
 
 def _build_model(cfg: TrainCfg) -> torch.nn.Module:
@@ -442,9 +553,118 @@ def main() -> None:
     logger = _setup_logger(out_dir / "train.log")
     writer = SummaryWriter(log_dir=str(out_dir / "tb"))
 
+    mlflow_enabled = bool(cfg.use_mlflow)
+    mlflow = None
+    active_run = None
+    if mlflow_enabled:
+        try:
+            dirty_status = _git_status_porcelain()
+        except Exception as e:
+            logger.error("Failed to query git status (%s).", str(e))
+            logger.error("When use_mlflow=true, this script expects to run inside a git checkout.")
+            raise SystemExit(2)
+
+        if dirty_status.strip() and (not bool(cfg.allow_dirty_git)):
+            logger.error("Refusing to run with dirty git worktree while use_mlflow=true and allow_dirty_git=false.")
+            logger.error("Dirty files:\n%s", dirty_status)
+            raise SystemExit(2)
+
+        try:
+            import mlflow as _mlflow  # type: ignore
+
+            mlflow = _mlflow
+        except Exception as e:
+            raise RuntimeError("use_mlflow=true but mlflow import failed. Install mlflow or disable use_mlflow.") from e
+
+        tracking_uri = _default_mlflow_tracking_uri(cfg)
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(_default_mlflow_experiment(cfg))
+
+        resume_run_id = _load_mlflow_run_id_from_resume(cfg.resume_from)
+        # Run name: deterministic enough to scan, but unique via timestamp in out_dir.
+        run_name = f"{out_dir.name}"
+        if resume_run_id:
+            active_run = mlflow.start_run(run_id=resume_run_id)
+        else:
+            active_run = mlflow.start_run(run_name=run_name)
+        run_id = active_run.info.run_id
+        _write_mlflow_run_id(out_dir, run_id)
+
+        # Tags: git + data + environment + linkage to output folder.
+        mlflow.set_tags(_get_git_info())
+        mlflow.set_tag("run_dir", str(out_dir))
+        for k, v in _get_env_info().items():
+            if v != "":
+                mlflow.set_tag(k, v)
+
+        # If dirty is allowed, capture a reproducible snapshot of local changes.
+        if dirty_status.strip() and bool(cfg.allow_dirty_git):
+            try:
+                mlflow.set_tag("git.dirty_allowed", "true")
+                (out_dir / "git_status_porcelain.txt").write_text(dirty_status + "\n", encoding="utf-8")
+                mlflow.log_artifact(str(out_dir / "git_status_porcelain.txt"), artifact_path="git")
+            except Exception:
+                pass
+            try:
+                diff = _run_git(["diff"])
+                (out_dir / "git_diff.patch").write_text(diff + "\n", encoding="utf-8")
+                mlflow.log_artifact(str(out_dir / "git_diff.patch"), artifact_path="git")
+            except Exception:
+                pass
+            try:
+                diff_cached = _run_git(["diff", "--cached"])
+                if diff_cached.strip():
+                    (out_dir / "git_diff_cached.patch").write_text(diff_cached + "\n", encoding="utf-8")
+                    mlflow.log_artifact(str(out_dir / "git_diff_cached.patch"), artifact_path="git")
+            except Exception:
+                pass
+
+        # Data/config fingerprints.
+        try:
+            cfg_path = Path(args.config)
+            if cfg_path.exists():
+                mlflow.set_tag("config.path", str(cfg_path))
+                mlflow.set_tag("config.sha256", _sha256_file(cfg_path))
+        except Exception:
+            pass
+        for split_key, split_path in [("split.train", cfg.train_ids), ("split.val", cfg.val_ids)]:
+            try:
+                p = Path(split_path)
+                if p.exists():
+                    mlflow.set_tag(f"{split_key}.path", str(p))
+                    mlflow.set_tag(f"{split_key}.sha256", _sha256_file(p))
+            except Exception:
+                pass
+
+        # Params: resolved config (flat key/value).
+        try:
+            mlflow.log_params({k: v for k, v in asdict(cfg).items()})
+        except Exception:
+            # Fallback: best-effort stringification (MLflow params are strings).
+            mlflow.log_params({k: str(v) for k, v in asdict(cfg).items()})
+
+        # Artifacts: configs/logs/splits/TB will be uploaded at end (and splits now).
+        try:
+            # Upload split files early to make the run self-contained.
+            for p in [Path(cfg.train_ids), Path(cfg.val_ids)]:
+                if p.exists():
+                    mlflow.log_artifact(str(p), artifact_path="splits")
+        except Exception:
+            pass
+
     accelerator = Accelerator(mixed_precision=str(cfg.mixed_precision))
     logger.info("Device: %s | mixed_precision=%s", str(accelerator.device), str(cfg.mixed_precision))
     logger.info("Output: %s", str(out_dir))
+
+    # For saving space: log static vis (raw/gt) only once per tag.
+    logged_static_vis_tags: set[str] = set()
+
+    # Running averages for utilization stats (when NVML is available).
+    gpu_util_sum = 0.0
+    gpu_util_n = 0
+    gpu_mem_util_sum = 0.0
+    gpu_mem_util_n = 0
 
     data_dir = os.path.join(cfg.data_root, "train")
     data_csv = os.path.join(cfg.data_root, "train.csv")
@@ -556,27 +776,41 @@ def main() -> None:
         writer.add_scalar("train/lr", float(current_lr), epoch)
         writer.add_scalar("train/grad_norm", float(epoch_grad_norm), epoch)
         writer.add_scalar("system/train_time_sec", float(train_time), epoch)
+        if mlflow_enabled and mlflow is not None:
+            mlflow.log_metric("train/loss", float(epoch_loss), step=int(epoch))
+            mlflow.log_metric("train/lr", float(current_lr), step=int(epoch))
+            mlflow.log_metric("train/grad_norm", float(epoch_grad_norm), step=int(epoch))
+            mlflow.log_metric("system/train_time_sec", float(train_time), step=int(epoch))
         if torch.cuda.is_available():
-            writer.add_scalar(
-                "system/gpu_mem_allocated_mb",
-                torch.cuda.memory_allocated() / (1024 * 1024),
-                epoch,
-            )
-            writer.add_scalar(
-                "system/gpu_mem_reserved_mb",
-                torch.cuda.memory_reserved() / (1024 * 1024),
-                epoch,
-            )
-            writer.add_scalar(
-                "system/gpu_mem_max_allocated_mb",
-                torch.cuda.max_memory_allocated() / (1024 * 1024),
-                epoch,
-            )
+            mem_alloc_gb = float(torch.cuda.memory_allocated()) / (1024 * 1024 * 1024)
+            mem_res_gb = float(torch.cuda.memory_reserved()) / (1024 * 1024 * 1024)
+            mem_max_alloc_gb = float(torch.cuda.max_memory_allocated()) / (1024 * 1024 * 1024)
+            writer.add_scalar("system/gpu_mem_allocated_gb", mem_alloc_gb, epoch)
+            writer.add_scalar("system/gpu_mem_reserved_gb", mem_res_gb, epoch)
+            writer.add_scalar("system/gpu_mem_max_allocated_gb", mem_max_alloc_gb, epoch)
+            if mlflow_enabled and mlflow is not None:
+                mlflow.log_metric("system/gpu_mem_allocated_gb", mem_alloc_gb, step=int(epoch))
+                mlflow.log_metric("system/gpu_mem_reserved_gb", mem_res_gb, step=int(epoch))
+                mlflow.log_metric("system/gpu_mem_max_allocated_gb", mem_max_alloc_gb, step=int(epoch))
             gpu_stats = _read_gpu_stats()
             if gpu_stats:
                 writer.add_scalar("system/gpu_utilization_pct", gpu_stats["gpu_utilization_pct"], epoch)
                 writer.add_scalar("system/gpu_mem_utilization_pct", gpu_stats["gpu_mem_utilization_pct"], epoch)
-                writer.add_scalar("system/gpu_mem_used_mb", gpu_stats["gpu_mem_used_mb"], epoch)
+                writer.add_scalar("system/gpu_mem_used_gb", gpu_stats["gpu_mem_used_gb"], epoch)
+
+                gpu_util_sum += float(gpu_stats["gpu_utilization_pct"])
+                gpu_util_n += 1
+                gpu_mem_util_sum += float(gpu_stats["gpu_mem_utilization_pct"])
+                gpu_mem_util_n += 1
+
+                if mlflow_enabled and mlflow is not None:
+                    mlflow.log_metric("system/gpu_utilization_pct", float(gpu_stats["gpu_utilization_pct"]), step=int(epoch))
+                    mlflow.log_metric(
+                        "system/gpu_mem_utilization_pct",
+                        float(gpu_stats["gpu_mem_utilization_pct"]),
+                        step=int(epoch),
+                    )
+                    mlflow.log_metric("system/gpu_mem_used_gb", float(gpu_stats["gpu_mem_used_gb"]), step=int(epoch))
 
         if epoch % int(cfg.val_interval) == 0:
             t_val = time.time()
@@ -632,13 +866,34 @@ def main() -> None:
             writer.add_scalar("val/dice_sw", float(val_sw_dice_mean), epoch)
             writer.add_scalar("val/loss_sw", float(val_sw_loss), epoch)
             writer.add_scalar("system/val_time_sec", float(val_time), epoch)
+            if mlflow_enabled and mlflow is not None:
+                mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(epoch))
+                mlflow.log_metric("val/dice_sw_mean", float(val_sw_dice_mean), step=int(epoch))
+                mlflow.log_metric("val/loss_sw", float(val_sw_loss), step=int(epoch))
+                mlflow.log_metric("system/val_time_sec", float(val_time), step=int(epoch))
 
             for i, cls_name in enumerate(CLASSES):
                 writer.add_scalar(f"train/dice_patch_{cls_name}", float(train_patch_dice_per_class[i].item()), epoch)
                 writer.add_scalar(f"val/dice_sw_{cls_name}", float(val_sw_dice_per_class[i].item()), epoch)
+                if mlflow_enabled and mlflow is not None:
+                    mlflow.log_metric(
+                        f"train/dice_patch_{cls_name}",
+                        float(train_patch_dice_per_class[i].item()),
+                        step=int(epoch),
+                    )
+                    mlflow.log_metric(
+                        f"val/dice_sw_{cls_name}",
+                        float(val_sw_dice_per_class[i].item()),
+                        step=int(epoch),
+                    )
 
             if do_vis and vis_images:
                 for tag, img in vis_images:
+                    # Save raw/gt once; pred can evolve over time.
+                    if tag.endswith("/raw") or tag.endswith("/gt"):
+                        if tag in logged_static_vis_tags:
+                            continue
+                        logged_static_vis_tags.add(tag)
                     writer.add_image(tag, img.detach().cpu(), epoch, dataformats="CHW")
 
             if float(val_sw_dice_mean) > float(best_metric):
@@ -675,8 +930,65 @@ def main() -> None:
     total = time.time() - training_start
     logger.info("Training done. best_metric=%.4f at epoch=%d", float(best_metric), int(best_metric_epoch))
     logger.info("Total time: %.1fs (%.2fh)", float(total), float(total) / 3600.0)
-    writer.add_scalar("system/total_training_time_sec", float(total), int(cfg.epochs))
+    total_hr = float(total) / 3600.0
+    writer.add_scalar("system/total_training_time_hr", float(total_hr), int(cfg.epochs))
+    if gpu_util_n:
+        writer.add_scalar(
+            "system/avg_gpu_utilization_pct",
+            float(gpu_util_sum) / float(gpu_util_n),
+            int(cfg.epochs),
+        )
+    if gpu_mem_util_n:
+        writer.add_scalar(
+            "system/avg_gpu_mem_utilization_pct",
+            float(gpu_mem_util_sum) / float(gpu_mem_util_n),
+            int(cfg.epochs),
+        )
+    if mlflow_enabled and mlflow is not None:
+        mlflow.log_metric("system/total_training_time_hr", float(total_hr), step=int(cfg.epochs))
+        mlflow.log_metric("summary/best_metric", float(best_metric), step=int(cfg.epochs))
+        mlflow.set_tag("summary/best_metric_epoch", str(int(best_metric_epoch)))
+        if gpu_util_n:
+            mlflow.log_metric("summary/avg_gpu_utilization_pct", float(gpu_util_sum) / float(gpu_util_n), step=int(cfg.epochs))
+        if gpu_mem_util_n:
+            mlflow.log_metric(
+                "summary/avg_gpu_mem_utilization_pct",
+                float(gpu_mem_util_sum) / float(gpu_mem_util_n),
+                step=int(cfg.epochs),
+            )
     writer.close()
+
+    if mlflow_enabled and mlflow is not None:
+        # Upload core artifacts for reproducibility and analysis.
+        try:
+            mlflow.log_artifact(str(out_dir / "config.yaml"), artifact_path="run")
+        except Exception:
+            pass
+        try:
+            mlflow.log_artifact(str(out_dir / "config.resolved.json"), artifact_path="run")
+        except Exception:
+            pass
+        try:
+            mlflow.log_artifact(str(out_dir / "train.log"), artifact_path="run")
+        except Exception:
+            pass
+        for ckpt_name in ["best.pt", "last.pt"]:
+            try:
+                p = out_dir / ckpt_name
+                if p.exists():
+                    mlflow.log_artifact(str(p), artifact_path="checkpoints")
+            except Exception:
+                pass
+        try:
+            tb_dir = out_dir / "tb"
+            if tb_dir.exists():
+                mlflow.log_artifacts(str(tb_dir), artifact_path="tb")
+        except Exception:
+            pass
+        try:
+            mlflow.end_run()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

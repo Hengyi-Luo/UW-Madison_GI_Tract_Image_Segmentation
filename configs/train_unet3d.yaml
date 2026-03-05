@@ -1,42 +1,7 @@
+# Minimal training config (override defaults as needed)
 data_root: inputs
 train_ids: inputs/splits/train_case_days.csv
 val_ids: inputs/splits/val_case_days.csv
-num_workers: 6
-
-seed: 42
-
-model_name: Unet3D
-spatial_dims: 3
-in_channels: 1
-out_channels: 3
-
-patch_d: 96
-patch_h: 224
-patch_w: 224
-
-lr: 1.0e-4
-weight_decay: 1.0e-4
-
-# OneCycleLR
-lr_max: 5.0e-4
-lr_pct_start: 0.2
-lr_div_factor: 25
-lr_final_div_factor: 1000
-
-epochs: 150
-val_interval: 3
-mixed_precision: fp16
-train_batch_size: 16
-val_batch_size: 1
-
-sw_batch_size: 4
-sw_overlap: 0.25
-
-val_vis_every: 5
-val_vis_samples: ./inputs/splits/val_vis_samples.json
-
-train_cache_rate: 1.0
-val_cache_rate: 1.0
 
 # If empty, an output dir is created under outputs/ with a timestamp prefix.
 output_dir: ""

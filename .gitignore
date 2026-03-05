@@ -2,8 +2,7 @@
 /checkpoints
 /outputs
 mlruns/
-mlflow.db
-mlflow.db.bak-*
+mlflow.db*
 __pycache__
 *.pt
 *.pth
@@ -14,13 +13,25 @@ tmp*.ipynb
 /*.ipynb
 val_infer_dice.py
 kaggle_weights/
-fork-of-best-public-kernel-ef10e0.ipynb
 
 /notes/
 reference_pipeline/
 
-# Datasets / archives
-uw-madison-gi-tract-image-segmentation.zip
+# Data / archives (avoid committing datasets)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+id_ed25519
+**/credentials.*
 
 # Keep only minimal configs tracked
 /configs/*.yaml

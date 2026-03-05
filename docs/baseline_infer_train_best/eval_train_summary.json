@@ -1,0 +1,21 @@
+{
+  "data_root": "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs",
+  "train_csv": "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/train.csv",
+  "weights": "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/outputs/20260302-212100_Unet3D/best.pt",
+  "ids_csv": "/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/train_case_days.csv",
+  "num_case_days": 216,
+  "mean_dice": 0.9293367292410061,
+  "mean_dice_per_class": [
+    0.9317466224785205,
+    0.9046214482298603,
+    0.9516421170146377
+  ],
+  "threshold": 0.5,
+  "roi_size": [
+    96,
+    224,
+    224
+  ],
+  "sw_batch_size": 2,
+  "overlap": 0.25
+}

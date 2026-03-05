@@ -1,19 +1,57 @@
 # UW-Madison GI Tract Segmentation (MONAI 3D)
 
-This repo follows the same structure as `/home/jeremiah/github/Guqin_Image_Generation/`:
-- `configs/` for YAML configuration
-- `scripts/` for run wrappers
-- `src/uwgi/` for training and inference modules
-- `outputs/` for checkpoints and inference outputs
+Baseline code for the **UW-Madison GI Tract Image Segmentation** task (Kaggle-style dataset), using a MONAI **3D U-Net** with:
+- full-volume validation via sliding-window inference
+- Kaggle-style RLE CSV export for inference
+- TensorBoard logging (always) + optional MLflow tracking
+
+**Task**: given a 3D volume assembled from 2D grayscale PNG slices (`case_day`), predict **multi-label** binary masks for:
+`large_bowel`, `small_bowel`, and `stomach`. Inference exports a Kaggle-style RLE CSV with one row per `(case_day, slice, class)`.
+
+Repo layout:
+- `configs/`: tracked YAML configs (release keeps only `train_unet3d.yaml` and `infer_unet3d.yaml`)
+- `scripts/`: training and inference entrypoints
+- `src/`: dataset utilities, RLE encode/decode, and model constants
+- `docs/`: detailed documentation (baseline + MLflow)
 
 ## Setup
 
-Recommended: Python 3.10/3.11.
+Recommended: Python 3.10+ with PyTorch + MONAI.
 
-Install dependencies (example):
+Install dependencies (example; adjust CUDA/PyTorch to your system):
 ```bash
 pip install torch monai opencv-python pandas numpy pyyaml accelerate tensorboard
 ```
+
+Optional (MLflow tracking):
+```bash
+pip install mlflow
+```
+
+Optional (GPU utilization metrics via NVML):
+```bash
+pip install pynvml
+```
+
+## Data
+
+Expected dataset layout under `data_root` (default: `inputs/`):
+```
+inputs/
+  train.csv
+  train/
+    caseXXX/
+      caseXXX_dayY/
+        scans/
+          *.png
+  splits/
+    train_case_days.csv
+    val_case_days.csv
+    val_vis_samples.json  (optional)
+```
+
+- Split files are CSV with a `case_day` header and one `case_day` per row.
+- `train.csv` is the Kaggle schema: `id,class,segmentation` (RLE may be empty for negatives).
 
 ## Training
 
@@ -22,70 +60,97 @@ Edit `configs/train_unet3d.yaml`, then:
 python scripts/train_unet3d.py --config configs/train_unet3d.yaml
 ```
 
+Detailed baseline documentation: `docs/TRAINING_BASELINE.md`.
+
 Which config is used?
 - `python scripts/train_unet3d.py --config <CONFIG>.yaml` uses the YAML you pass in.
 - If you run `python scripts/train_unet3d.py` without args, it defaults to `configs/train_unet3d.yaml`.
 
 Notes:
-- Default model is `swin_unetr`. For SwinUNETR, `patch_d/patch_h/patch_w` should be divisible by 32.
+- Baseline model is MONAI `Unet` (3D, multi-label with sigmoid).
 - `mixed_precision` can be `no`, `fp16`, or `bf16` (requires `accelerate`).
-- `use_tensorboard` enables logging to `tb_dir`.
-- You can provide explicit train/val splits via `train_ids` and `val_ids` (csv/txt/json); this overrides `val_ratio`.
-- MLflow params/metrics are logged if `use_mlflow: true`. This repo pins MLflow to `mlflow.db` by default; start UI with:
+- TensorBoard logs are written to `outputs/<run>/tb/`.
+- You can provide explicit train/val splits via `train_ids` and `val_ids` (CSV with `case_day` header).
+- MLflow params/metrics/artifacts (including TensorBoard logs) are logged if `use_mlflow: true` (see `docs/MLFLOW.md`).
+  - By default, the tracking backend uses `mlflow.db` when present (or `$MLFLOW_TRACKING_URI` if set).
+  - Start UI with:
 ```bash
 mlflow ui --backend-store-uri sqlite:///$(pwd)/mlflow.db --host 0.0.0.0 --port 5000
 ```
 
-## SwinUNETR pretrained init (BTCV)
-
-This repo supports loading a SwinUNETR pretrained checkpoint as an initialization (partial load by shape match).
-
+TensorBoard:
 ```bash
-bash scripts/download_swin_unetr_btcv.sh
-bash scripts/run_train.sh configs/train_swin_unetr_btcv_init.yaml
+tensorboard --logdir outputs --port 6006 --host 0.0.0.0
 ```
-
-## Preset configs (fp16, 30 epochs)
-
-- UNet: `configs/train_unet_fp16_16gb.yaml`
-- SwinUNETR: `configs/train_swin_unetr_fp16_16gb.yaml`
 
 ## Resume training (checkpoint + MLflow resume)
 
 This repo writes:
 - `best.pt` when validation improves
-- `last.pt` every epoch (configurable via `save_last_every`)
+- `last.pt` every epoch
 
-To resume in-place (same `run_dir`, same MLflow `run_id`, continuous curves), set `resume_from` to a previous run's `last.pt` (or pass it via CLI) using `configs/train_resume.yaml`, then:
-```bash
-bash scripts/run_train.sh configs/train_resume.yaml --resume_from /path/to/last.pt
+To resume:
+- Set `resume_from` to a previous run’s `last.pt` (also restores optimizer + scheduler).
+- To resume in-place (write back into the same folder), also set `output_dir` to that run directory.
+
+Example snippet:
+```yaml
+output_dir: "outputs/<run_name>"
+resume_from: "outputs/<run_name>/last.pt"
 ```
+
+## Outputs
+
+Training run folder (default `outputs/<timestamp>_<model_name>/`):
+- `best.pt`, `last.pt`
+- `train.log`
+- `tb/` (TensorBoard event files)
+- When `use_mlflow: true`: `mlflow_run_id.txt` (+ optional `git/` artifacts if dirty is allowed)
+
+Inference output folder (controlled by `output_dir` in `configs/infer_unet3d.yaml`):
+- `submit.csv` (Kaggle-style RLE CSV)
+- If `evaluate: true`: `eval_per_case.csv`, `eval_summary.json`
+- `infer_summary.json` + resolved config dumps
 
 ## Inference (submission)
 
-Edit `configs/infer.yaml`, then:
+Edit `configs/infer_unet3d.yaml`, then:
 ```bash
-bash scripts/run_infer.sh configs/infer.yaml
+python scripts/infer_unet3d.py --config configs/infer_unet3d.yaml
 ```
 
 Notes:
-- `uwgi.infer_cli` expects a Kaggle-style `test/` directory under `data_root`.
-- If `sample_submission` is provided, outputs are merged to match Kaggle ordering.
+- Produces a Kaggle-style RLE CSV (`submit.csv` by default) under `output_dir`.
+- If `evaluate: true`, it also computes Dice on the split by decoding GT masks from `train_csv` and writes:
+  - `eval_per_case.csv`
+  - `eval_summary.json`
+- Current inference script builds its slice index from `data_root/train/`, so `ids_csv` must refer to `case_day` entries that exist under that folder (e.g. val inference on the training set).
 
 ## Validation (visualization)
 
-Use `val_pipeline.ipynb` to pick and visualize a small set of validation slices (GT vs Pred) for qualitative checks.
-
-During training, you can also log a fixed set of val slice visualizations to TensorBoard via:
+During training, the baseline can log a fixed set of val slice visualizations to TensorBoard (raw / GT / prediction):
 - `val_vis_every` (0 disables)
-- `val_vis_n` (default 16)
-- `val_vis_samples` (JSON path, default: `/home/jeremiah/github/UW-Madison_GI_Tract_Image_Segmentation/inputs/splits/val_vis_samples.json`)
+- `val_vis_samples` (JSON containing `case_day` + `slice_pos`)
 
-For quick GT visualization in notebooks, see `uwgi.viz.plot_case_day_slice_gt`.
-For GT vs prediction visualization, see `uwgi.viz.plot_case_day_slice_gt_pred`.
+Helper script to generate sample lists:
+```bash
+python scripts/make_vis_samples.py --help
+```
 
+## Example (raw / GT / prediction)
 
-mlflow ui --backend-store-uri sqlite:///$(pwd)/mlflow.db --host 0.0.0.0 --port 5000
+Qualitative validation example for `case122_day27`, `slice_069` at training step `1000`:
 
-eval "$(ssh-agent -s)"
-ssh-add /home/ubuntu/.ssh/id_ed25519_github
+| Raw | Ground truth (GT) | Prediction |
+| --- | --- | --- |
+| ![raw](docs/images/val_vis_case122_day27_slice069_raw.png) | ![gt](docs/images/val_vis_case122_day27_slice069_gt.png) | ![pred](docs/images/val_vis_case122_day27_slice069_pred.png) |
+
+Overlay colors (channels in `src/constants.py` order):
+- Red: `large_bowel`
+- Green: `small_bowel`
+- Blue: `stomach`
+
+## Docs
+
+- Training baseline details: `docs/TRAINING_BASELINE.md`
+- MLflow tracking details: `docs/MLFLOW.md`

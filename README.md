@@ -80,6 +80,7 @@ Train split (`inputs/splits/train_case_days.csv`):
 
 - Training baseline details: `docs/TRAINING_BASELINE.md`
 - MLflow tracking details: `docs/MLFLOW.md`
+- Metrics protocol and evaluation bias controls: `docs/METRICS_PROTOCOL.md`
 
 ## To update
 
@@ -127,4 +128,3 @@ Planned improvements (not included in this release). This section is meant as a 
 - Model candidates:
   - MONAI `SwinUNETR`, `DynUNet`, `SegResNet` (or lighter backbones for speed)
   - multi-scale / deep supervision variants
-

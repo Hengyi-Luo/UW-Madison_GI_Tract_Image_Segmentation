@@ -23,6 +23,7 @@ from pathlib import Path
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 from typing import Any
@@ -45,6 +46,7 @@ os.chdir(REPO_ROOT)
 from src.constants import CLASSES  # noqa: E402
 from src.data_utils import build_case_day_slices, build_rle_index, load_case_days  # noqa: E402
 from src.datasets import LoadCaseDayImaged, LoadCaseDayVolumed  # noqa: E402
+from src.metrics import SegmentationMetricAccumulator  # noqa: E402
 from src.rle import rle_encode  # noqa: E402
 
 
@@ -180,13 +182,14 @@ def _write_submit_csv(path: Path, rows: list[dict[str, str]]) -> None:
         w.writerows(rows)
 
 
-def _dice_per_class(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    pred = pred.float()
-    target = target.float()
-    dims = tuple(range(1, pred.ndim))
-    inter = (pred * target).sum(dim=dims)
-    denom = pred.sum(dim=dims) + target.sum(dim=dims)
-    return (2.0 * inter + eps) / (denom + eps)
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -253,8 +256,7 @@ def main() -> None:
     print(f"Case_days: {len(case_days)}")
 
     infer_files = [{"case_day": cd} for cd in case_days]
-    per_case_rows: list[dict[str, Any]] = []
-    dice_sum = torch.zeros(len(CLASSES), dtype=torch.float64)
+    metric_acc = SegmentationMetricAccumulator(class_names=CLASSES, threshold=float(cfg.threshold))
 
     if cfg.eval_enabled:
         if not os.path.exists(cfg.train_csv):
@@ -332,21 +334,11 @@ def main() -> None:
 
             if cfg.eval_enabled:
                 y = batch["label"].to(device).to(torch.uint8)  # (1,C,D,H,W)
-                gt = y[0, :, :orig_d, :orig_h, :orig_w]
-                dice_c = _dice_per_class(
-                    pred[0, :, :orig_d, :orig_h, :orig_w].float(),
-                    gt.float(),
-                )
-                dice_sum += dice_c.double().cpu()
-                per_case_rows.append(
-                    {
-                        "case_day": str(case_day),
-                        "dice_mean": float(dice_c.mean().item()),
-                        "dice_large_bowel": float(dice_c[0].item()),
-                        "dice_small_bowel": float(dice_c[1].item()),
-                        "dice_stomach": float(dice_c[2].item()),
-                        "num_slices": int(orig_d),
-                    }
+                metric_acc.update(
+                    pred[:, :, :orig_d, :orig_h, :orig_w].float(),
+                    y[:, :, :orig_d, :orig_h, :orig_w].float(),
+                    case_ids=[case_day],
+                    num_slices=[int(orig_d)],
                 )
 
             for z in range(int(orig_d)):
@@ -361,38 +353,35 @@ def main() -> None:
     _write_submit_csv(out_csv, rows)
 
     if cfg.eval_enabled:
+        per_case_rows = metric_acc.per_case_rows()
+        eval_summary_metrics = metric_acc.summary()
         eval_per_case_path = out_dir / str(cfg.eval_per_case_name)
         with open(eval_per_case_path, "w", encoding="utf-8", newline="") as f:
-            w = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "case_day",
-                    "dice_mean",
-                    "dice_large_bowel",
-                    "dice_small_bowel",
-                    "dice_stomach",
-                    "num_slices",
-                ],
-            )
+            fieldnames = list(per_case_rows[0].keys()) if per_case_rows else ["case_day", "num_slices", "dice_mean"]
+            w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows(per_case_rows)
 
-        mean_dice_per_class = (dice_sum / max(1, len(per_case_rows))).tolist()
-        mean_dice = float(sum(mean_dice_per_class) / len(mean_dice_per_class))
         eval_summary = {
             "data_root": str(Path(cfg.data_root).resolve()),
             "train_csv": str(Path(cfg.train_csv).resolve()),
             "weights": str(Path(cfg.weights).resolve()),
             "ids_csv": str(Path(cfg.ids_csv).resolve()),
+            "protocol": "docs/METRICS_PROTOCOL.md",
+            "hd95_units": "voxels",
             "num_case_days": int(len(per_case_rows)),
-            "mean_dice": float(mean_dice),
-            "mean_dice_per_class": [float(x) for x in mean_dice_per_class],
+            **eval_summary_metrics,
+            "mean_dice": float(eval_summary_metrics["dice_mean"]),
+            "mean_dice_per_class": [float(eval_summary_metrics[f"dice_{cls_name}"]) for cls_name in CLASSES],
             "threshold": float(thr),
             "roi_size": list(roi_size),
             "sw_batch_size": int(sw_batch_size),
             "overlap": float(overlap),
         }
-        (out_dir / str(cfg.eval_summary_name)).write_text(json.dumps(eval_summary, indent=2) + "\n", encoding="utf-8")
+        (out_dir / str(cfg.eval_summary_name)).write_text(
+            json.dumps(_json_safe(eval_summary), indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     summary = {
         "weights": str(Path(cfg.weights).resolve()),
@@ -405,7 +394,7 @@ def main() -> None:
         "overlap": float(overlap),
         "output_csv": str(out_csv),
     }
-    (out_dir / "infer_summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    (out_dir / "infer_summary.json").write_text(json.dumps(_json_safe(summary), indent=2) + "\n", encoding="utf-8")
 
     print(f"Wrote submission CSV: {out_csv}")
     if cfg.eval_enabled:
@@ -416,4 +405,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

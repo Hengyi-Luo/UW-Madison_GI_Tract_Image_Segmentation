@@ -81,6 +81,7 @@ Train split (`inputs/splits/train_case_days.csv`):
 - Training baseline details: `docs/TRAINING_BASELINE.md`
 - MLflow tracking details: `docs/MLFLOW.md`
 - Metrics protocol and evaluation bias controls: `docs/METRICS_PROTOCOL.md`
+- Protocol benchmark script: `analysis/scripts/benchmark_metrics_protocol.py`
 
 ## To update
 

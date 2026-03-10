@@ -28,7 +28,6 @@ from monai.data import CacheDataset, DataLoader
 from monai.data import pad_list_data_collate
 from monai.inferers import sliding_window_inference
 from monai.losses import DiceCELoss
-from monai.metrics import DiceMetric
 from monai.networks.layers import Norm
 from monai.networks.nets import Unet
 from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, RandSpatialCropd, ScaleIntensityd, SpatialPadd
@@ -38,6 +37,7 @@ from torch.utils.tensorboard import SummaryWriter
 from src.constants import CLASSES
 from src.data_utils import build_case_day_slices, build_rle_index, load_case_days, load_val_vis_samples
 from src.datasets import LoadCaseDayVolumed
+from src.metrics import SegmentationMetricAccumulator
 
 try:
     import pynvml  # type: ignore
@@ -450,15 +450,15 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def compute_patch_dice(
+def compute_patch_metrics(
     *,
     model: torch.nn.Module,
     data_loader: DataLoader,
     accelerator: Accelerator,
-    dice_metric: DiceMetric,
     threshold: float = 0.5,
-) -> tuple[torch.Tensor, float]:
+) -> dict[str, float | int]:
     model.eval()
+    metric_acc = SegmentationMetricAccumulator(class_names=CLASSES, metric_names=["dice"], threshold=threshold)
     device = accelerator.device
     for batch in data_loader:
         images, labels = _batch_to_device(batch, device)
@@ -466,26 +466,25 @@ def compute_patch_dice(
             logits = model(images)
         probs = torch.sigmoid(logits)
         preds = (probs > float(threshold)).float()
-        dice_metric(y_pred=preds, y=labels)
-    dice_per_class = dice_metric.aggregate()
-    return dice_per_class, float(dice_per_class.mean().item())
+        metric_acc.update(preds, labels)
+    return metric_acc.summary()
 
 
 @torch.no_grad()
-def compute_sw_dice(
+def compute_sw_metrics(
     *,
     model: torch.nn.Module,
     data_loader: DataLoader,
     accelerator: Accelerator,
-    dice_metric: DiceMetric,
     loss_function: torch.nn.Module,
     roi_size: tuple[int, int, int],
     sw_batch_size: int,
     sw_overlap: float,
     threshold: float = 0.5,
     vis_case_day_to_slices: dict[str, list[int]] | None = None,
-) -> tuple[torch.Tensor, float, float, list[tuple[str, torch.Tensor]]]:
+) -> tuple[dict[str, float | int], float, list[tuple[str, torch.Tensor]]]:
     model.eval()
+    metric_acc = SegmentationMetricAccumulator(class_names=CLASSES, threshold=threshold)
     device = accelerator.device
     total_loss = 0.0
     vis_images: list[tuple[str, torch.Tensor]] = []
@@ -505,7 +504,7 @@ def compute_sw_dice(
 
         probs = torch.sigmoid(logits)
         preds = (probs > float(threshold)).float()
-        dice_metric(y_pred=preds, y=labels)
+        metric_acc.update(preds, labels)
 
         if vis_case_day_to_slices:
             case_day = _to_case_day(batch.get("case_day", ""))
@@ -531,10 +530,8 @@ def compute_sw_dice(
                         (f"val_vis/{case_day}/slice_{int(slice_pos):03d}/pred", _overlay_masks_rgb(img2d, pred2d))
                     )
 
-    dice_per_class = dice_metric.aggregate()
-    dice_mean = float(dice_per_class.mean().item())
     n = max(1, len(data_loader))
-    return dice_per_class, dice_mean, total_loss / n, vis_images
+    return metric_acc.summary(), total_loss / n, vis_images
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -752,8 +749,6 @@ def main() -> None:
         logger=logger,
     )
 
-    dice_metric = DiceMetric(include_background=True, reduction="mean_batch", get_not_nans=False)
-
     model, optimizer, train_loader, val_loader = accelerator.prepare(model, optimizer, train_loader, val_loader)
     loss_function = loss_function.to(accelerator.device)
 
@@ -832,58 +827,96 @@ def main() -> None:
                         continue
                     vis_case_day_to_slices.setdefault(cd, []).append(sp)
 
-            dice_metric.reset()
-            train_patch_dice_per_class, train_patch_dice_mean = compute_patch_dice(
+            train_patch_summary = compute_patch_metrics(
                 model=model,
                 data_loader=train_loader,
                 accelerator=accelerator,
-                dice_metric=dice_metric,
             )
-            dice_metric.reset()
-            val_sw_dice_per_class, val_sw_dice_mean, val_sw_loss, vis_images = compute_sw_dice(
+            val_sw_summary, val_sw_loss, vis_images = compute_sw_metrics(
                 model=model,
                 data_loader=val_loader,
                 accelerator=accelerator,
-                dice_metric=dice_metric,
                 loss_function=loss_function,
                 roi_size=cfg.patch_size,
                 sw_batch_size=int(cfg.sw_batch_size),
                 sw_overlap=float(cfg.sw_overlap),
                 vis_case_day_to_slices=vis_case_day_to_slices,
             )
-            dice_metric.reset()
             val_time = time.time() - t_val
 
+            train_patch_dice_mean = float(train_patch_summary["dice_mean"])
+            val_sw_dice_mean = float(val_sw_summary["dice_mean"])
+            val_sw_precision_mean = float(val_sw_summary["precision_mean"])
+            val_sw_recall_mean = float(val_sw_summary["recall_mean"])
+            val_sw_hd95_mean = float(val_sw_summary["hd95_mean"])
+            val_sw_rve_mean = float(val_sw_summary["rve_mean"])
+
             logger.info(
-                "Epoch %d train_dice=%.4f val_sw_dice=%.4f val_sw_loss=%.4f val_time=%.1fs",
+                "Epoch %d train_dice=%.4f val_dice=%.4f val_precision=%.4f val_recall=%.4f val_hd95=%.4f val_rve=%.4f val_loss=%.4f val_time=%.1fs",
                 epoch,
                 float(train_patch_dice_mean),
                 float(val_sw_dice_mean),
+                float(val_sw_precision_mean),
+                float(val_sw_recall_mean),
+                float(val_sw_hd95_mean),
+                float(val_sw_rve_mean),
                 float(val_sw_loss),
                 float(val_time),
             )
             writer.add_scalar("train/dice_patch", float(train_patch_dice_mean), epoch)
             writer.add_scalar("val/dice_sw", float(val_sw_dice_mean), epoch)
+            writer.add_scalar("val/precision_sw", float(val_sw_precision_mean), epoch)
+            writer.add_scalar("val/recall_sw", float(val_sw_recall_mean), epoch)
+            writer.add_scalar("val/hd95_sw", float(val_sw_hd95_mean), epoch)
+            writer.add_scalar("val/rve_sw", float(val_sw_rve_mean), epoch)
             writer.add_scalar("val/loss_sw", float(val_sw_loss), epoch)
             writer.add_scalar("system/val_time_sec", float(val_time), epoch)
             if mlflow_enabled and mlflow is not None:
                 mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(epoch))
                 mlflow.log_metric("val/dice_sw_mean", float(val_sw_dice_mean), step=int(epoch))
+                mlflow.log_metric("val/precision_sw_mean", float(val_sw_precision_mean), step=int(epoch))
+                mlflow.log_metric("val/recall_sw_mean", float(val_sw_recall_mean), step=int(epoch))
+                mlflow.log_metric("val/hd95_sw_mean", float(val_sw_hd95_mean), step=int(epoch))
+                mlflow.log_metric("val/rve_sw_mean", float(val_sw_rve_mean), step=int(epoch))
                 mlflow.log_metric("val/loss_sw", float(val_sw_loss), step=int(epoch))
                 mlflow.log_metric("system/val_time_sec", float(val_time), step=int(epoch))
 
             for i, cls_name in enumerate(CLASSES):
-                writer.add_scalar(f"train/dice_patch_{cls_name}", float(train_patch_dice_per_class[i].item()), epoch)
-                writer.add_scalar(f"val/dice_sw_{cls_name}", float(val_sw_dice_per_class[i].item()), epoch)
+                writer.add_scalar(f"train/dice_patch_{cls_name}", float(train_patch_summary[f"dice_{cls_name}"]), epoch)
+                writer.add_scalar(f"val/dice_sw_{cls_name}", float(val_sw_summary[f"dice_{cls_name}"]), epoch)
+                writer.add_scalar(f"val/precision_sw_{cls_name}", float(val_sw_summary[f"precision_{cls_name}"]), epoch)
+                writer.add_scalar(f"val/recall_sw_{cls_name}", float(val_sw_summary[f"recall_{cls_name}"]), epoch)
+                writer.add_scalar(f"val/hd95_sw_{cls_name}", float(val_sw_summary[f"hd95_{cls_name}"]), epoch)
+                writer.add_scalar(f"val/rve_sw_{cls_name}", float(val_sw_summary[f"rve_{cls_name}"]), epoch)
                 if mlflow_enabled and mlflow is not None:
                     mlflow.log_metric(
                         f"train/dice_patch_{cls_name}",
-                        float(train_patch_dice_per_class[i].item()),
+                        float(train_patch_summary[f"dice_{cls_name}"]),
                         step=int(epoch),
                     )
                     mlflow.log_metric(
                         f"val/dice_sw_{cls_name}",
-                        float(val_sw_dice_per_class[i].item()),
+                        float(val_sw_summary[f"dice_{cls_name}"]),
+                        step=int(epoch),
+                    )
+                    mlflow.log_metric(
+                        f"val/precision_sw_{cls_name}",
+                        float(val_sw_summary[f"precision_{cls_name}"]),
+                        step=int(epoch),
+                    )
+                    mlflow.log_metric(
+                        f"val/recall_sw_{cls_name}",
+                        float(val_sw_summary[f"recall_{cls_name}"]),
+                        step=int(epoch),
+                    )
+                    mlflow.log_metric(
+                        f"val/hd95_sw_{cls_name}",
+                        float(val_sw_summary[f"hd95_{cls_name}"]),
+                        step=int(epoch),
+                    )
+                    mlflow.log_metric(
+                        f"val/rve_sw_{cls_name}",
+                        float(val_sw_summary[f"rve_{cls_name}"]),
                         step=int(epoch),
                     )
 
@@ -908,7 +941,7 @@ def main() -> None:
                         "scheduler_state_dict": scheduler.state_dict(),
                         "best_metric": float(best_metric),
                         "best_metric_epoch": int(best_metric_epoch),
-                        "dice_per_class": val_sw_dice_per_class.detach().cpu().numpy(),
+                        "metric_summary": {k: float(v) if isinstance(v, float) else int(v) for k, v in val_sw_summary.items()},
                     },
                     str(out_dir / "best.pt"),
                 )

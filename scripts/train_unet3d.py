@@ -223,15 +223,17 @@ def _load_python_module(path: Path, *, module_name: str):
 
 
 def _pad_collate_keep_slice_idxs(batch: list[dict[str, Any]]) -> dict[str, Any]:
-    """Pad-collate tensors but keep variable-length slice_idxs as a list."""
-    slice_idxs = [item.get("slice_idxs") for item in batch]
+    """Pad-collate tensors but keep non-tensor volume metadata as Python lists."""
+    metadata_keys = ("slice_idxs", "orig_shape")
+    preserved = {key: [item.get(key) for item in batch] for key in metadata_keys}
     batch_no_idxs: list[dict[str, Any]] = []
     for item in batch:
         item = dict(item)
-        item.pop("slice_idxs", None)
+        for key in metadata_keys:
+            item.pop(key, None)
         batch_no_idxs.append(item)
     collated = pad_list_data_collate(batch_no_idxs)
-    collated["slice_idxs"] = slice_idxs
+    collated.update(preserved)
     return collated
 
 

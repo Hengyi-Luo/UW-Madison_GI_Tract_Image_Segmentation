@@ -1,11 +1,9 @@
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-import numpy as np
 import torch
-from scipy import ndimage
+from monai.metrics import compute_hausdorff_distance
 
 from .constants import CLASSES
 
@@ -72,41 +70,6 @@ def _normalize_num_slices(num_slices: Sequence[int] | None, batch_size: int) -> 
     if len(num_slices) != batch_size:
         raise ValueError(f"Expected {batch_size} slice counts, got {len(num_slices)}")
     return [int(x) for x in num_slices]
-
-
-def _surface_distances(
-    source_mask: np.ndarray,
-    target_mask: np.ndarray,
-    *,
-    spacing: Sequence[float] | None,
-) -> np.ndarray:
-    if source_mask.ndim != target_mask.ndim:
-        raise ValueError(f"source and target masks must have same ndim, got {source_mask.ndim} vs {target_mask.ndim}")
-
-    structure = ndimage.generate_binary_structure(source_mask.ndim, 1)
-    source_eroded = ndimage.binary_erosion(source_mask, structure=structure, border_value=0)
-    target_eroded = ndimage.binary_erosion(target_mask, structure=structure, border_value=0)
-    source_surface = source_mask ^ source_eroded
-    target_surface = target_mask ^ target_eroded
-
-    if not source_surface.any() or not target_surface.any():
-        return np.asarray([], dtype=np.float64)
-
-    target_distance = ndimage.distance_transform_edt(~target_surface, sampling=spacing)
-    return target_distance[source_surface]
-
-
-def _hd95_numpy(
-    pred_mask: np.ndarray,
-    target_mask: np.ndarray,
-    *,
-    spacing: Sequence[float] | None,
-) -> float:
-    forward = _surface_distances(pred_mask, target_mask, spacing=spacing)
-    backward = _surface_distances(target_mask, pred_mask, spacing=spacing)
-    if forward.size == 0 or backward.size == 0:
-        return float("nan")
-    return float(max(np.percentile(forward, 95.0), np.percentile(backward, 95.0)))
 
 
 def _compute_metric_tensors(
@@ -178,19 +141,24 @@ def _compute_metric_tensors(
         hd95_valid = gt_present & pred_present
         hd95 = torch.full((batch_size, num_classes), float("nan"), dtype=torch.float32, device=pred.device)
         if bool(hd95_valid.any()):
-            for batch_index in range(batch_size):
-                sample_spacing = _sample_spacing(spacing, batch_index=batch_index)
-                for class_idx in range(num_classes):
-                    if not bool(hd95_valid[batch_index, class_idx]):
-                        continue
-                    pred_np = pred_mask[batch_index, class_idx].detach().cpu().numpy().astype(bool, copy=False)
-                    target_np = target_mask[batch_index, class_idx].detach().cpu().numpy().astype(bool, copy=False)
-                    value = _hd95_numpy(
-                        pred_np,
-                        target_np,
-                        spacing=tuple(float(x) for x in sample_spacing) if sample_spacing is not None else None,
-                    )
-                    hd95[batch_index, class_idx] = float(value)
+            spacing_arg: Sequence[float] | Sequence[Sequence[float]] | None = None
+            if spacing is not None:
+                spacing_arg = []
+                for batch_index in range(batch_size):
+                    sample_spacing = _sample_spacing(spacing, batch_index=batch_index)
+                    if sample_spacing is None:
+                        spacing_arg.append(None)  # type: ignore[arg-type]
+                    else:
+                        spacing_arg.append(tuple(float(x) for x in sample_spacing))  # type: ignore[arg-type]
+            hd95_values = compute_hausdorff_distance(
+                y_pred=pred_mask.float(),
+                y=target_mask.float(),
+                include_background=True,
+                percentile=95.0,
+                directed=False,
+                spacing=spacing_arg,
+            )
+            hd95[hd95_valid] = hd95_values[hd95_valid].to(dtype=torch.float32)
         tensors["hd95"] = hd95
         tensors["hd95_valid"] = hd95_valid
 

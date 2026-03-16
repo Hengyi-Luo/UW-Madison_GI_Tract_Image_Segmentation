@@ -9,7 +9,7 @@ train_csv: inputs/train.csv  # required when evaluate: true
 
 # Weights / outputs
 # Set this (or pass `--weights`) before running.
-weights: ""
+weights: "outputs/20260304-194354_Unet3D/best.pt"
 # If empty, defaults to: <weights_parent>/infer
 # Tip: set explicitly to avoid mixing multiple inference runs.
 output_dir: ""

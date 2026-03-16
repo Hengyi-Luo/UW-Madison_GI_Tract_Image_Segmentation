@@ -42,7 +42,9 @@ lr_final_div_factor: 1000
 
 # training
 epochs: 100
-val_interval: 3
+val_interval: 5
+train_patch_metrics_interval: 0  # 0 disables full-train patch eval during validation
+val_hd95_interval: 0  # disable HD95 during training-time validation; infer still computes it
 mixed_precision: fp16  # no | fp16 | bf16
 train_batch_size: 8
 val_batch_size: 1

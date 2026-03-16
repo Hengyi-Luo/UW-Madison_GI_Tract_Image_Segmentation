@@ -19,7 +19,7 @@ import platform
 import subprocess
 import time
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 import yaml
@@ -37,7 +37,7 @@ from torch.utils.tensorboard import SummaryWriter
 from src.constants import CLASSES
 from src.data_utils import build_case_day_slices, build_rle_index, load_case_days, load_val_vis_samples
 from src.datasets import LoadCaseDayVolumed
-from src.metrics import SegmentationMetricAccumulator
+from src.metrics import DEFAULT_METRIC_NAMES, SegmentationMetricAccumulator
 
 try:
     import pynvml  # type: ignore
@@ -94,6 +94,8 @@ class TrainCfg:
     # training
     epochs: int = 150
     val_interval: int = 3
+    train_patch_metrics_interval: int = 0
+    val_hd95_interval: int = 0
     mixed_precision: str = "fp16"  # no | fp16 | bf16
     train_batch_size: int = 16
     val_batch_size: int = 1
@@ -160,6 +162,16 @@ def _save_run_config(cfg: TrainCfg, out_dir: Path, *, config_path: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "config.yaml").write_text(Path(config_path).read_text(encoding="utf-8"), encoding="utf-8")
     (out_dir / "config.resolved.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
+
+
+def _write_resolved_runtime_config(out_dir: Path, cfg: TrainCfg, *, steps_per_epoch: int) -> dict[str, int | float | str]:
+    payload: dict[str, int | float | str] = dict(asdict(cfg))
+    payload["steps_per_epoch"] = int(steps_per_epoch)
+    payload["total_steps"] = int(steps_per_epoch) * int(cfg.epochs)
+    payload["val_interval_steps"] = int(steps_per_epoch) * int(cfg.val_interval)
+    payload["val_vis_every_steps"] = int(steps_per_epoch) * int(cfg.val_vis_every)
+    (out_dir / "config.resolved.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
 
 
 def _build_transforms(*, cfg: TrainCfg, case_day_slices, rle_index):
@@ -337,9 +349,9 @@ def _load_resume(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
     logger: logging.Logger,
-) -> tuple[int, float, int]:
+) -> tuple[int, int, float, int]:
     if not cfg.resume_from:
-        return 1, -1.0, -1
+        return 1, 0, -1.0, -1
 
     p = Path(cfg.resume_from)
     if not p.exists():
@@ -356,10 +368,18 @@ def _load_resume(
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
 
     start_epoch = int(ckpt.get("epoch", 1))
+    global_step = int(ckpt.get("global_step", 0))
     best_metric = float(ckpt.get("best_metric", -1.0))
     best_metric_epoch = int(ckpt.get("best_metric_epoch", -1))
-    logger.info("Resumed from %s (epoch=%d, best=%.4f@%d)", str(p), start_epoch, best_metric, best_metric_epoch)
-    return start_epoch, best_metric, best_metric_epoch
+    logger.info(
+        "Resumed from %s (epoch=%d, global_step=%d, best=%.4f@%d)",
+        str(p),
+        start_epoch,
+        global_step,
+        best_metric,
+        best_metric_epoch,
+    )
+    return start_epoch, global_step, best_metric, best_metric_epoch
 
 
 def _batch_to_device(batch: dict[str, Any], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -423,7 +443,8 @@ def train_one_epoch(
     loss_function: torch.nn.Module,
     accelerator: Accelerator,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
-) -> tuple[float, float]:
+    global_step: int,
+) -> tuple[float, float, int]:
     model.train()
     device = accelerator.device
     epoch_loss = 0.0
@@ -444,9 +465,10 @@ def train_one_epoch(
 
         epoch_loss += float(loss.item())
         epoch_grad_norm += float(grad_norm.item())
+        global_step += 1
 
     n = max(1, len(train_loader))
-    return epoch_loss / n, epoch_grad_norm / n
+    return epoch_loss / n, epoch_grad_norm / n, global_step
 
 
 @torch.no_grad()
@@ -480,16 +502,23 @@ def compute_sw_metrics(
     roi_size: tuple[int, int, int],
     sw_batch_size: int,
     sw_overlap: float,
+    metric_names: Sequence[str] | None = None,
     threshold: float = 0.5,
     vis_case_day_to_slices: dict[str, list[int]] | None = None,
+    logger: logging.Logger | None = None,
 ) -> tuple[dict[str, float | int], float, list[tuple[str, torch.Tensor]]]:
     model.eval()
-    metric_acc = SegmentationMetricAccumulator(class_names=CLASSES, threshold=threshold)
+    metric_acc = SegmentationMetricAccumulator(
+        class_names=CLASSES,
+        threshold=threshold,
+        metric_names=metric_names or DEFAULT_METRIC_NAMES,
+    )
     device = accelerator.device
     total_loss = 0.0
     vis_images: list[tuple[str, torch.Tensor]] = []
 
-    for batch in data_loader:
+    total_batches = max(1, len(data_loader))
+    for batch_index, batch in enumerate(data_loader, start=1):
         images, labels = _batch_to_device(batch, device)
         with accelerator.autocast():
             logits = sliding_window_inference(
@@ -504,6 +533,14 @@ def compute_sw_metrics(
 
         probs = torch.sigmoid(logits)
         preds = (probs > float(threshold)).float()
+
+        if logger is not None:
+            logger.info(
+                "Validation case %d/%d: inference done, computing metrics%s",
+                batch_index,
+                total_batches,
+                " (including HD95)" if "hd95" in metric_acc.metric_names else "",
+            )
         metric_acc.update(preds, labels)
 
         if vis_case_day_to_slices:
@@ -529,6 +566,9 @@ def compute_sw_metrics(
                     vis_images.append(
                         (f"val_vis/{case_day}/slice_{int(slice_pos):03d}/pred", _overlay_masks_rgb(img2d, pred2d))
                     )
+
+        if logger is not None and (batch_index % 10 == 0 or batch_index == total_batches):
+            logger.info("Validation progress: %d/%d cases", batch_index, total_batches)
 
     n = max(1, len(data_loader))
     return metric_acc.summary(), total_loss / n, vis_images
@@ -731,6 +771,10 @@ def main() -> None:
     loss_function = DiceCELoss(sigmoid=True, squared_pred=True, reduction="mean")
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=float(cfg.weight_decay))
     steps_per_epoch = max(1, len(train_loader))
+    resolved_runtime_cfg = _write_resolved_runtime_config(out_dir, cfg, steps_per_epoch=int(steps_per_epoch))
+    total_steps = int(resolved_runtime_cfg["total_steps"])
+    val_interval_steps = int(resolved_runtime_cfg["val_interval_steps"])
+    val_vis_every_steps = int(resolved_runtime_cfg["val_vis_every_steps"])
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=float(cfg.lr_max),
@@ -741,7 +785,7 @@ def main() -> None:
         final_div_factor=float(cfg.lr_final_div_factor),
     )
 
-    start_epoch, best_metric, best_metric_epoch = _load_resume(
+    start_epoch, global_step, best_metric, best_metric_epoch = _load_resume(
         cfg,
         model=model,
         optimizer=optimizer,
@@ -752,46 +796,91 @@ def main() -> None:
     model, optimizer, train_loader, val_loader = accelerator.prepare(model, optimizer, train_loader, val_loader)
     loss_function = loss_function.to(accelerator.device)
 
+    logger.info(
+        "Schedule: steps_per_epoch=%d total_steps=%d val_interval_steps=%d val_vis_every_steps=%d",
+        int(steps_per_epoch),
+        int(total_steps),
+        int(val_interval_steps),
+        int(val_vis_every_steps),
+    )
+    writer.add_text(
+        "run/equivalent_steps",
+        (
+            f"steps_per_epoch={int(steps_per_epoch)}\n"
+            f"total_steps={int(total_steps)}\n"
+            f"val_interval_steps={int(val_interval_steps)}\n"
+            f"val_vis_every_steps={int(val_vis_every_steps)}"
+        ),
+        0,
+    )
+    writer.add_scalar("system/steps_per_epoch", float(steps_per_epoch), 0)
+    writer.add_scalar("system/total_steps_planned", float(total_steps), 0)
+    writer.add_scalar("system/val_interval_steps", float(val_interval_steps), 0)
+    writer.add_scalar("system/val_vis_every_steps", float(val_vis_every_steps), 0)
+    if mlflow_enabled and mlflow is not None:
+        mlflow.log_params(
+            {
+                "steps_per_epoch": int(steps_per_epoch),
+                "total_steps": int(total_steps),
+                "val_interval_steps": int(val_interval_steps),
+                "val_vis_every_steps": int(val_vis_every_steps),
+            }
+        )
+        mlflow.set_tag("schedule.steps_per_epoch", str(int(steps_per_epoch)))
+        mlflow.set_tag("schedule.total_steps", str(int(total_steps)))
+        mlflow.set_tag("schedule.val_interval_steps", str(int(val_interval_steps)))
+        mlflow.set_tag("schedule.val_vis_every_steps", str(int(val_vis_every_steps)))
+
     training_start = time.time()
     for epoch in range(int(start_epoch), int(cfg.epochs) + 1):
         t0 = time.time()
-        epoch_loss, epoch_grad_norm = train_one_epoch(
+        epoch_loss, epoch_grad_norm, global_step = train_one_epoch(
             model=model,
             train_loader=train_loader,
             optimizer=optimizer,
             loss_function=loss_function,
             accelerator=accelerator,
             scheduler=scheduler,
+            global_step=int(global_step),
         )
         train_time = time.time() - t0
 
         current_lr = float(optimizer.param_groups[0]["lr"])
-        logger.info("Epoch %d loss=%.4f lr=%.2e train_time=%.1fs", epoch, epoch_loss, current_lr, train_time)
-        writer.add_scalar("train/loss", float(epoch_loss), epoch)
-        writer.add_scalar("train/lr", float(current_lr), epoch)
-        writer.add_scalar("train/grad_norm", float(epoch_grad_norm), epoch)
-        writer.add_scalar("system/train_time_sec", float(train_time), epoch)
+        logger.info(
+            "Epoch %d global_step=%d loss=%.4f lr=%.2e train_time=%.1fs",
+            epoch,
+            int(global_step),
+            epoch_loss,
+            current_lr,
+            train_time,
+        )
+        writer.add_scalar("train/loss", float(epoch_loss), int(global_step))
+        writer.add_scalar("train/lr", float(current_lr), int(global_step))
+        writer.add_scalar("train/grad_norm", float(epoch_grad_norm), int(global_step))
+        writer.add_scalar("system/train_time_sec", float(train_time), int(global_step))
+        writer.add_scalar("system/epoch", float(epoch), int(global_step))
         if mlflow_enabled and mlflow is not None:
-            mlflow.log_metric("train/loss", float(epoch_loss), step=int(epoch))
-            mlflow.log_metric("train/lr", float(current_lr), step=int(epoch))
-            mlflow.log_metric("train/grad_norm", float(epoch_grad_norm), step=int(epoch))
-            mlflow.log_metric("system/train_time_sec", float(train_time), step=int(epoch))
+            mlflow.log_metric("train/loss", float(epoch_loss), step=int(global_step))
+            mlflow.log_metric("train/lr", float(current_lr), step=int(global_step))
+            mlflow.log_metric("train/grad_norm", float(epoch_grad_norm), step=int(global_step))
+            mlflow.log_metric("system/train_time_sec", float(train_time), step=int(global_step))
+            mlflow.log_metric("system/epoch", float(epoch), step=int(global_step))
         if torch.cuda.is_available():
             mem_alloc_gb = float(torch.cuda.memory_allocated()) / (1024 * 1024 * 1024)
             mem_res_gb = float(torch.cuda.memory_reserved()) / (1024 * 1024 * 1024)
             mem_max_alloc_gb = float(torch.cuda.max_memory_allocated()) / (1024 * 1024 * 1024)
-            writer.add_scalar("system/gpu_mem_allocated_gb", mem_alloc_gb, epoch)
-            writer.add_scalar("system/gpu_mem_reserved_gb", mem_res_gb, epoch)
-            writer.add_scalar("system/gpu_mem_max_allocated_gb", mem_max_alloc_gb, epoch)
+            writer.add_scalar("system/gpu_mem_allocated_gb", mem_alloc_gb, int(global_step))
+            writer.add_scalar("system/gpu_mem_reserved_gb", mem_res_gb, int(global_step))
+            writer.add_scalar("system/gpu_mem_max_allocated_gb", mem_max_alloc_gb, int(global_step))
             if mlflow_enabled and mlflow is not None:
-                mlflow.log_metric("system/gpu_mem_allocated_gb", mem_alloc_gb, step=int(epoch))
-                mlflow.log_metric("system/gpu_mem_reserved_gb", mem_res_gb, step=int(epoch))
-                mlflow.log_metric("system/gpu_mem_max_allocated_gb", mem_max_alloc_gb, step=int(epoch))
+                mlflow.log_metric("system/gpu_mem_allocated_gb", mem_alloc_gb, step=int(global_step))
+                mlflow.log_metric("system/gpu_mem_reserved_gb", mem_res_gb, step=int(global_step))
+                mlflow.log_metric("system/gpu_mem_max_allocated_gb", mem_max_alloc_gb, step=int(global_step))
             gpu_stats = _read_gpu_stats()
             if gpu_stats:
-                writer.add_scalar("system/gpu_utilization_pct", gpu_stats["gpu_utilization_pct"], epoch)
-                writer.add_scalar("system/gpu_mem_utilization_pct", gpu_stats["gpu_mem_utilization_pct"], epoch)
-                writer.add_scalar("system/gpu_mem_used_gb", gpu_stats["gpu_mem_used_gb"], epoch)
+                writer.add_scalar("system/gpu_utilization_pct", gpu_stats["gpu_utilization_pct"], int(global_step))
+                writer.add_scalar("system/gpu_mem_utilization_pct", gpu_stats["gpu_mem_utilization_pct"], int(global_step))
+                writer.add_scalar("system/gpu_mem_used_gb", gpu_stats["gpu_mem_used_gb"], int(global_step))
 
                 gpu_util_sum += float(gpu_stats["gpu_utilization_pct"])
                 gpu_util_n += 1
@@ -799,17 +888,28 @@ def main() -> None:
                 gpu_mem_util_n += 1
 
                 if mlflow_enabled and mlflow is not None:
-                    mlflow.log_metric("system/gpu_utilization_pct", float(gpu_stats["gpu_utilization_pct"]), step=int(epoch))
+                    mlflow.log_metric(
+                        "system/gpu_utilization_pct",
+                        float(gpu_stats["gpu_utilization_pct"]),
+                        step=int(global_step),
+                    )
                     mlflow.log_metric(
                         "system/gpu_mem_utilization_pct",
                         float(gpu_stats["gpu_mem_utilization_pct"]),
-                        step=int(epoch),
+                        step=int(global_step),
                     )
-                    mlflow.log_metric("system/gpu_mem_used_gb", float(gpu_stats["gpu_mem_used_gb"]), step=int(epoch))
+                    mlflow.log_metric("system/gpu_mem_used_gb", float(gpu_stats["gpu_mem_used_gb"]), step=int(global_step))
 
         if epoch % int(cfg.val_interval) == 0:
             t_val = time.time()
             model.eval()
+            run_train_patch_metrics = bool(cfg.train_patch_metrics_interval) and (
+                epoch % int(cfg.train_patch_metrics_interval) == 0
+            )
+            run_hd95 = bool(cfg.val_hd95_interval) and (epoch % int(cfg.val_hd95_interval) == 0)
+            val_metric_names = ["dice", "precision", "recall", "rve"]
+            if run_hd95:
+                val_metric_names.append("hd95")
 
             do_vis = bool(cfg.val_vis_every) and (epoch % int(cfg.val_vis_every) == 0) and bool(vis_samples)
             vis_case_day_to_slices: dict[str, list[int]] | None = None
@@ -827,11 +927,13 @@ def main() -> None:
                         continue
                     vis_case_day_to_slices.setdefault(cd, []).append(sp)
 
-            train_patch_summary = compute_patch_metrics(
-                model=model,
-                data_loader=train_loader,
-                accelerator=accelerator,
-            )
+            train_patch_summary = None
+            if run_train_patch_metrics:
+                train_patch_summary = compute_patch_metrics(
+                    model=model,
+                    data_loader=train_loader,
+                    accelerator=accelerator,
+                )
             val_sw_summary, val_sw_loss, vis_images = compute_sw_metrics(
                 model=model,
                 data_loader=val_loader,
@@ -840,20 +942,23 @@ def main() -> None:
                 roi_size=cfg.patch_size,
                 sw_batch_size=int(cfg.sw_batch_size),
                 sw_overlap=float(cfg.sw_overlap),
+                metric_names=val_metric_names,
                 vis_case_day_to_slices=vis_case_day_to_slices,
+                logger=logger,
             )
             val_time = time.time() - t_val
 
-            train_patch_dice_mean = float(train_patch_summary["dice_mean"])
+            train_patch_dice_mean = float(train_patch_summary["dice_mean"]) if train_patch_summary is not None else float("nan")
             val_sw_dice_mean = float(val_sw_summary["dice_mean"])
             val_sw_precision_mean = float(val_sw_summary["precision_mean"])
             val_sw_recall_mean = float(val_sw_summary["recall_mean"])
-            val_sw_hd95_mean = float(val_sw_summary["hd95_mean"])
+            val_sw_hd95_mean = float(val_sw_summary["hd95_mean"]) if "hd95_mean" in val_sw_summary else float("nan")
             val_sw_rve_mean = float(val_sw_summary["rve_mean"])
 
             logger.info(
-                "Epoch %d train_dice=%.4f val_dice=%.4f val_precision=%.4f val_recall=%.4f val_hd95=%.4f val_rve=%.4f val_loss=%.4f val_time=%.1fs",
+                "Epoch %d global_step=%d train_dice=%.4f val_dice=%.4f val_precision=%.4f val_recall=%.4f val_hd95=%.4f val_rve=%.4f val_loss=%.4f val_time=%.1fs",
                 epoch,
+                int(global_step),
                 float(train_patch_dice_mean),
                 float(val_sw_dice_mean),
                 float(val_sw_precision_mean),
@@ -863,61 +968,81 @@ def main() -> None:
                 float(val_sw_loss),
                 float(val_time),
             )
-            writer.add_scalar("train/dice_patch", float(train_patch_dice_mean), epoch)
-            writer.add_scalar("val/dice_sw", float(val_sw_dice_mean), epoch)
-            writer.add_scalar("val/precision_sw", float(val_sw_precision_mean), epoch)
-            writer.add_scalar("val/recall_sw", float(val_sw_recall_mean), epoch)
-            writer.add_scalar("val/hd95_sw", float(val_sw_hd95_mean), epoch)
-            writer.add_scalar("val/rve_sw", float(val_sw_rve_mean), epoch)
-            writer.add_scalar("val/loss_sw", float(val_sw_loss), epoch)
-            writer.add_scalar("system/val_time_sec", float(val_time), epoch)
+            if train_patch_summary is not None:
+                writer.add_scalar("train/dice_patch", float(train_patch_dice_mean), int(global_step))
+            writer.add_scalar("val/dice_sw", float(val_sw_dice_mean), int(global_step))
+            writer.add_scalar("val/precision_sw", float(val_sw_precision_mean), int(global_step))
+            writer.add_scalar("val/recall_sw", float(val_sw_recall_mean), int(global_step))
+            if "hd95_mean" in val_sw_summary:
+                writer.add_scalar("val/hd95_sw", float(val_sw_hd95_mean), int(global_step))
+            writer.add_scalar("val/rve_sw", float(val_sw_rve_mean), int(global_step))
+            writer.add_scalar("val/loss_sw", float(val_sw_loss), int(global_step))
+            writer.add_scalar("system/val_time_sec", float(val_time), int(global_step))
             if mlflow_enabled and mlflow is not None:
-                mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(epoch))
-                mlflow.log_metric("val/dice_sw_mean", float(val_sw_dice_mean), step=int(epoch))
-                mlflow.log_metric("val/precision_sw_mean", float(val_sw_precision_mean), step=int(epoch))
-                mlflow.log_metric("val/recall_sw_mean", float(val_sw_recall_mean), step=int(epoch))
-                mlflow.log_metric("val/hd95_sw_mean", float(val_sw_hd95_mean), step=int(epoch))
-                mlflow.log_metric("val/rve_sw_mean", float(val_sw_rve_mean), step=int(epoch))
-                mlflow.log_metric("val/loss_sw", float(val_sw_loss), step=int(epoch))
-                mlflow.log_metric("system/val_time_sec", float(val_time), step=int(epoch))
+                if train_patch_summary is not None:
+                    mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(global_step))
+                mlflow.log_metric("val/dice_sw_mean", float(val_sw_dice_mean), step=int(global_step))
+                mlflow.log_metric("val/precision_sw_mean", float(val_sw_precision_mean), step=int(global_step))
+                mlflow.log_metric("val/recall_sw_mean", float(val_sw_recall_mean), step=int(global_step))
+                if "hd95_mean" in val_sw_summary:
+                    mlflow.log_metric("val/hd95_sw_mean", float(val_sw_hd95_mean), step=int(global_step))
+                mlflow.log_metric("val/rve_sw_mean", float(val_sw_rve_mean), step=int(global_step))
+                mlflow.log_metric("val/loss_sw", float(val_sw_loss), step=int(global_step))
+                mlflow.log_metric("system/val_time_sec", float(val_time), step=int(global_step))
 
             for i, cls_name in enumerate(CLASSES):
-                writer.add_scalar(f"train/dice_patch_{cls_name}", float(train_patch_summary[f"dice_{cls_name}"]), epoch)
-                writer.add_scalar(f"val/dice_sw_{cls_name}", float(val_sw_summary[f"dice_{cls_name}"]), epoch)
-                writer.add_scalar(f"val/precision_sw_{cls_name}", float(val_sw_summary[f"precision_{cls_name}"]), epoch)
-                writer.add_scalar(f"val/recall_sw_{cls_name}", float(val_sw_summary[f"recall_{cls_name}"]), epoch)
-                writer.add_scalar(f"val/hd95_sw_{cls_name}", float(val_sw_summary[f"hd95_{cls_name}"]), epoch)
-                writer.add_scalar(f"val/rve_sw_{cls_name}", float(val_sw_summary[f"rve_{cls_name}"]), epoch)
-                if mlflow_enabled and mlflow is not None:
-                    mlflow.log_metric(
+                if train_patch_summary is not None:
+                    writer.add_scalar(
                         f"train/dice_patch_{cls_name}",
                         float(train_patch_summary[f"dice_{cls_name}"]),
-                        step=int(epoch),
+                        int(global_step),
                     )
+                writer.add_scalar(f"val/dice_sw_{cls_name}", float(val_sw_summary[f"dice_{cls_name}"]), int(global_step))
+                writer.add_scalar(
+                    f"val/precision_sw_{cls_name}",
+                    float(val_sw_summary[f"precision_{cls_name}"]),
+                    int(global_step),
+                )
+                writer.add_scalar(
+                    f"val/recall_sw_{cls_name}",
+                    float(val_sw_summary[f"recall_{cls_name}"]),
+                    int(global_step),
+                )
+                if f"hd95_{cls_name}" in val_sw_summary:
+                    writer.add_scalar(f"val/hd95_sw_{cls_name}", float(val_sw_summary[f"hd95_{cls_name}"]), int(global_step))
+                writer.add_scalar(f"val/rve_sw_{cls_name}", float(val_sw_summary[f"rve_{cls_name}"]), int(global_step))
+                if mlflow_enabled and mlflow is not None:
+                    if train_patch_summary is not None:
+                        mlflow.log_metric(
+                            f"train/dice_patch_{cls_name}",
+                            float(train_patch_summary[f"dice_{cls_name}"]),
+                            step=int(global_step),
+                        )
                     mlflow.log_metric(
                         f"val/dice_sw_{cls_name}",
                         float(val_sw_summary[f"dice_{cls_name}"]),
-                        step=int(epoch),
+                        step=int(global_step),
                     )
                     mlflow.log_metric(
                         f"val/precision_sw_{cls_name}",
                         float(val_sw_summary[f"precision_{cls_name}"]),
-                        step=int(epoch),
+                        step=int(global_step),
                     )
                     mlflow.log_metric(
                         f"val/recall_sw_{cls_name}",
                         float(val_sw_summary[f"recall_{cls_name}"]),
-                        step=int(epoch),
+                        step=int(global_step),
                     )
-                    mlflow.log_metric(
-                        f"val/hd95_sw_{cls_name}",
-                        float(val_sw_summary[f"hd95_{cls_name}"]),
-                        step=int(epoch),
-                    )
+                    if f"hd95_{cls_name}" in val_sw_summary:
+                        mlflow.log_metric(
+                            f"val/hd95_sw_{cls_name}",
+                            float(val_sw_summary[f"hd95_{cls_name}"]),
+                            step=int(global_step),
+                        )
                     mlflow.log_metric(
                         f"val/rve_sw_{cls_name}",
                         float(val_sw_summary[f"rve_{cls_name}"]),
-                        step=int(epoch),
+                        step=int(global_step),
                     )
 
             if do_vis and vis_images:
@@ -927,7 +1052,7 @@ def main() -> None:
                         if tag in logged_static_vis_tags:
                             continue
                         logged_static_vis_tags.add(tag)
-                    writer.add_image(tag, img.detach().cpu(), epoch, dataformats="CHW")
+                    writer.add_image(tag, img.detach().cpu(), int(global_step), dataformats="CHW")
 
             if float(val_sw_dice_mean) > float(best_metric):
                 best_metric = float(val_sw_dice_mean)
@@ -936,6 +1061,7 @@ def main() -> None:
                 torch.save(
                     {
                         "epoch": int(epoch),
+                        "global_step": int(global_step),
                         "model_state_dict": unwrapped.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
                         "scheduler_state_dict": scheduler.state_dict(),
@@ -951,6 +1077,7 @@ def main() -> None:
         torch.save(
             {
                 "epoch": int(epoch + 1),
+                "global_step": int(global_step),
                 "model_state_dict": unwrapped.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
@@ -964,30 +1091,31 @@ def main() -> None:
     logger.info("Training done. best_metric=%.4f at epoch=%d", float(best_metric), int(best_metric_epoch))
     logger.info("Total time: %.1fs (%.2fh)", float(total), float(total) / 3600.0)
     total_hr = float(total) / 3600.0
-    writer.add_scalar("system/total_training_time_hr", float(total_hr), int(cfg.epochs))
+    writer.add_scalar("system/total_training_time_hr", float(total_hr), int(global_step))
     if gpu_util_n:
         writer.add_scalar(
             "system/avg_gpu_utilization_pct",
             float(gpu_util_sum) / float(gpu_util_n),
-            int(cfg.epochs),
+            int(global_step),
         )
     if gpu_mem_util_n:
         writer.add_scalar(
             "system/avg_gpu_mem_utilization_pct",
             float(gpu_mem_util_sum) / float(gpu_mem_util_n),
-            int(cfg.epochs),
+            int(global_step),
         )
     if mlflow_enabled and mlflow is not None:
-        mlflow.log_metric("system/total_training_time_hr", float(total_hr), step=int(cfg.epochs))
-        mlflow.log_metric("summary/best_metric", float(best_metric), step=int(cfg.epochs))
+        mlflow.log_metric("system/total_training_time_hr", float(total_hr), step=int(global_step))
+        mlflow.log_metric("summary/best_metric", float(best_metric), step=int(global_step))
         mlflow.set_tag("summary/best_metric_epoch", str(int(best_metric_epoch)))
+        mlflow.set_tag("summary/last_global_step", str(int(global_step)))
         if gpu_util_n:
-            mlflow.log_metric("summary/avg_gpu_utilization_pct", float(gpu_util_sum) / float(gpu_util_n), step=int(cfg.epochs))
+            mlflow.log_metric("summary/avg_gpu_utilization_pct", float(gpu_util_sum) / float(gpu_util_n), step=int(global_step))
         if gpu_mem_util_n:
             mlflow.log_metric(
                 "summary/avg_gpu_mem_utilization_pct",
                 float(gpu_mem_util_sum) / float(gpu_mem_util_n),
-                step=int(cfg.epochs),
+                step=int(global_step),
             )
     writer.close()
 

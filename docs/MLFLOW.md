@@ -1,6 +1,6 @@
 # MLflow Tracking (Training)
 
-This repo logs training runs to MLflow from `scripts/train_unet3d.py` when `use_mlflow: true` in your config.
+This repo logs training runs to MLflow from `scripts/train_unet3d.py` when `cfg.use_mlflow = True` in your config module.
 
 ## Quick start
 
@@ -9,16 +9,16 @@ This repo logs training runs to MLflow from `scripts/train_unet3d.py` when `use_
 pip install mlflow
 ```
 
-2) Enable tracking in `configs/train_unet3d.yaml`:
-```yaml
-use_mlflow: true
-mlflow_tracking_uri: "sqlite:///./mlflow.db"   # optional
-mlflow_experiment: "uwgi/segmentation"         # optional
+2) Enable tracking in `configs/train_unet3d.py`:
+```python
+cfg.use_mlflow = True
+cfg.mlflow_tracking_uri = "sqlite:///./mlflow.db"   # optional
+cfg.mlflow_experiment = "uwgi/segmentation"         # optional
 ```
 
 3) Run training:
 ```bash
-python scripts/train_unet3d.py --config configs/train_unet3d.yaml
+python scripts/train_unet3d.py --config configs/train_unet3d.py
 ```
 
 4) Open the UI (SQLite backend in this repo):
@@ -29,7 +29,7 @@ mlflow ui --backend-store-uri sqlite:///$(pwd)/mlflow.db --host 0.0.0.0 --port 5
 ## Where MLflow data lives (default)
 
 - Tracking backend:
-  - Uses `mlflow_tracking_uri` from the YAML when set.
+  - Uses `cfg.mlflow_tracking_uri` from the Python config when set.
   - Otherwise uses `$MLFLOW_TRACKING_URI` when set.
   - Otherwise uses `sqlite:///<repo>/mlflow.db` when `mlflow.db` exists.
 - Artifacts:
@@ -114,4 +114,3 @@ use_mlflow: true
 ```
 
 If `resume_from` is empty, or `mlflow_run_id.txt` is missing next to the checkpoint, a new MLflow run is created.
-

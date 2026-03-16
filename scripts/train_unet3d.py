@@ -13,6 +13,7 @@ os.chdir(REPO_ROOT)
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import logging
 import platform
@@ -22,7 +23,6 @@ from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
 import torch
-import yaml
 from accelerate import Accelerator
 from monai.data import CacheDataset, DataLoader
 from monai.data import pad_list_data_collate
@@ -30,13 +30,11 @@ from monai.inferers import sliding_window_inference
 from monai.losses import DiceCELoss
 from monai.networks.layers import Norm
 from monai.networks.nets import Unet
-from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, RandSpatialCropd, ScaleIntensityd, SpatialPadd
 from monai.utils import set_determinism
 from torch.utils.tensorboard import SummaryWriter
 
 from src.constants import CLASSES
 from src.data_utils import build_case_day_slices, build_rle_index, load_case_days, load_val_vis_samples
-from src.datasets import LoadCaseDayVolumed
 from src.metrics import DEFAULT_METRIC_NAMES, SegmentationMetricAccumulator
 
 try:
@@ -136,11 +134,12 @@ def _setup_logger(log_path: Path) -> logging.Logger:
     return logger
 
 
-def _load_cfg(path: str) -> TrainCfg:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    if not isinstance(raw, dict):
-        raise ValueError("Config YAML must be a mapping at the top level.")
+def _load_cfg(path: str) -> tuple[TrainCfg, Any]:
+    cfg_path = Path(path)
+    if cfg_path.suffix != ".py":
+        raise ValueError(f"Config must be a Python module (.py), got: {cfg_path}")
+    module = _load_python_module(cfg_path, module_name="train_unet3d_config")
+    raw = _extract_python_cfg(module, cfg_path)
 
     known = set(TrainCfg().__dict__.keys())
     unknown = sorted([k for k in raw.keys() if k not in known])
@@ -148,7 +147,7 @@ def _load_cfg(path: str) -> TrainCfg:
         raise ValueError(f"Unknown config keys: {unknown}")
 
     merged = {**TrainCfg().__dict__, **raw}
-    return TrainCfg(**merged)
+    return TrainCfg(**merged), module
 
 
 def _resolve_output_dir(cfg: TrainCfg) -> Path:
@@ -158,10 +157,25 @@ def _resolve_output_dir(cfg: TrainCfg) -> Path:
     return Path("outputs") / f"{ts}_{cfg.model_name}"
 
 
-def _save_run_config(cfg: TrainCfg, out_dir: Path, *, config_path: str) -> None:
+def _extract_python_cfg(module: Any, path: Path) -> dict[str, Any]:
+    cfg_obj = getattr(module, "cfg", None)
+    if cfg_obj is None:
+        raise AttributeError(f"Python config '{path}' must define a top-level 'cfg'")
+    if isinstance(cfg_obj, dict):
+        return dict(cfg_obj)
+    if hasattr(cfg_obj, "__dict__"):
+        return {k: v for k, v in vars(cfg_obj).items() if not k.startswith("_")}
+    raise TypeError(f"Unsupported cfg type in '{path}': {type(cfg_obj).__name__}")
+
+
+def _save_run_config(cfg: TrainCfg, out_dir: Path, *, config_path: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "config.yaml").write_text(Path(config_path).read_text(encoding="utf-8"), encoding="utf-8")
+    source_path = Path(config_path)
+    saved_name = f"config{source_path.suffix.lower()}" if source_path.suffix else "config.txt"
+    saved_path = out_dir / saved_name
+    saved_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
     (out_dir / "config.resolved.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
+    return saved_path
 
 
 def _write_resolved_runtime_config(out_dir: Path, cfg: TrainCfg, *, steps_per_epoch: int) -> dict[str, int | float | str]:
@@ -174,27 +188,38 @@ def _write_resolved_runtime_config(out_dir: Path, cfg: TrainCfg, *, steps_per_ep
     return payload
 
 
-def _build_transforms(*, cfg: TrainCfg, case_day_slices, rle_index):
-    common = [
-        LoadCaseDayVolumed(
-            keys=["case_day"],
-            case_day_slices=case_day_slices,
-            rle_index=rle_index,
-        ),
-        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-        ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
-        SpatialPadd(keys=["image", "label"], spatial_size=cfg.patch_size, mode="constant"),
-    ]
-
-    train_transforms = Compose(
-        [
-            *common,
-            RandSpatialCropd(keys=["image", "label"], roi_size=cfg.patch_size, random_size=False),
-            EnsureTyped(keys=["image", "label"]),
-        ]
+def _build_transforms(*, cfg: TrainCfg, cfg_module: Any, case_day_slices, rle_index):
+    module = cfg_module
+    build_train_transforms = getattr(module, "build_train_transforms", None)
+    build_val_transforms = getattr(module, "build_val_transforms", None)
+    if build_train_transforms is None or build_val_transforms is None:
+        raise AttributeError(
+            "Config module must define 'build_train_transforms' and 'build_val_transforms'"
+        )
+    train_transforms = build_train_transforms(
+        cfg=cfg,
+        case_day_slices=case_day_slices,
+        rle_index=rle_index,
     )
-    val_transforms = Compose([*common, EnsureTyped(keys=["image", "label"])])
+    val_transforms = build_val_transforms(
+        cfg=cfg,
+        case_day_slices=case_day_slices,
+        rle_index=rle_index,
+    )
     return train_transforms, val_transforms
+
+
+def _load_python_module(path: Path, *, module_name: str):
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    if not path.exists():
+        raise FileNotFoundError(f"Python module not found: {path}")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load Python module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _pad_collate_keep_slice_idxs(batch: list[dict[str, Any]]) -> dict[str, Any]:
@@ -576,17 +601,17 @@ def compute_sw_metrics(
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
-    p.add_argument("--config", type=str, default="configs/train_unet3d.yaml")
+    p.add_argument("--config", type=str, default="configs/train_unet3d.py")
     return p
 
 
 def main() -> None:
     args = _build_parser().parse_args()
-    cfg = _load_cfg(args.config)
+    cfg, cfg_module = _load_cfg(args.config)
     set_determinism(int(cfg.seed))
 
     out_dir = _resolve_output_dir(cfg)
-    _save_run_config(cfg, out_dir, config_path=args.config)
+    saved_config_path = _save_run_config(cfg, out_dir, config_path=args.config)
     logger = _setup_logger(out_dir / "train.log")
     writer = SummaryWriter(log_dir=str(out_dir / "tb"))
 
@@ -731,7 +756,12 @@ def main() -> None:
         logger.info("val_vis_samples not loaded (%s): %s", cfg.val_vis_samples, str(e))
         vis_samples = None
 
-    train_transforms, val_transforms = _build_transforms(cfg=cfg, case_day_slices=case_day_slices, rle_index=rle_index)
+    train_transforms, val_transforms = _build_transforms(
+        cfg=cfg,
+        cfg_module=cfg_module,
+        case_day_slices=case_day_slices,
+        rle_index=rle_index,
+    )
 
     t_cache = time.time()
     logger.info("Caching train/val datasets... (workers=%d)", int(cfg.num_workers))
@@ -1122,7 +1152,7 @@ def main() -> None:
     if mlflow_enabled and mlflow is not None:
         # Upload core artifacts for reproducibility and analysis.
         try:
-            mlflow.log_artifact(str(out_dir / "config.yaml"), artifact_path="run")
+            mlflow.log_artifact(str(saved_config_path), artifact_path="run")
         except Exception:
             pass
         try:

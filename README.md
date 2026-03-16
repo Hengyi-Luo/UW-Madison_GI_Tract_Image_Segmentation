@@ -33,7 +33,7 @@ Overlay colors (channels in `src/constants.py` order):
 All three PNGs are the same pixel size; if they *look* different in your markdown preview, it’s typically due to how the renderer scales images inside tables. The fixed `width` above forces consistent display size.
 
 Repo layout:
-- `configs/`: tracked YAML configs (release keeps only `train_unet3d.yaml` and `infer_unet3d.yaml`)
+- `configs/`: tracked training config modules and inference config files
 - `scripts/`: training and inference entrypoints
 - `src/`: dataset utilities, RLE encode/decode, and model constants
 - `docs/`: detailed documentation (baseline + MLflow)

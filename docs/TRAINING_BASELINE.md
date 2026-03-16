@@ -5,16 +5,16 @@ This document describes the **current training baseline** implemented in `script
 ## Entry point
 
 - Script: `scripts/train_unet3d.py`
-- Config: YAML passed via `--config` (default: `configs/train_unet3d.yaml`)
+- Config: Python module passed via `--config` (default: `configs/train_unet3d.py`)
 
 Run:
 ```bash
-python scripts/train_unet3d.py --config configs/train_unet3d.yaml
+python scripts/train_unet3d.py --config configs/train_unet3d.py
 ```
 
 Notes:
 - The script sets the working directory to the repo root at startup, so relative paths in configs are interpreted from the repo root.
-- The script currently supports **only one CLI flag**: `--config`. To change things like `resume_from`, edit the YAML.
+- The script currently supports **only one CLI flag**: `--config`. To change things like `resume_from`, edit the Python config module.
 
 ## Data layout and expectations
 
@@ -303,7 +303,7 @@ All YAML keys must match fields in `TrainCfg` (unknown keys raise an error). Cur
   - `train_cache_rate`, `val_cache_rate`
 
 See example configs:
-- `configs/train_unet3d.yaml`
+- `configs/train_unet3d.py`
 
 ## Common pitfalls / troubleshooting
 
@@ -311,4 +311,3 @@ See example configs:
 - **Train/val overlap error**: the script refuses to run if the same `case_day` appears in both split files.
 - **Out-of-memory during caching**: `CacheDataset` can be RAM-heavy because each item is a full 3D volume + masks. Reduce `train_cache_rate` / `val_cache_rate` or `num_workers`.
 - **Patch size constraints**: `patch_d/patch_h/patch_w` must be compatible with your GPU memory. Larger patches increase both training memory and validation SW inference cost.
-

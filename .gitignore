@@ -1,4 +1,6 @@
 /inputs/train
+/inputs/train_nifti
+/inputs/train_mask_nifti
 /checkpoints
 /outputs
 mlruns/

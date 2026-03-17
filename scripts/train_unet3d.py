@@ -19,7 +19,7 @@ import logging
 import platform
 import subprocess
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field, fields
 from typing import Any, Sequence
 
 import torch
@@ -27,7 +27,7 @@ from accelerate import Accelerator
 from monai.data import CacheDataset, DataLoader
 from monai.data import pad_list_data_collate
 from monai.inferers import sliding_window_inference
-from monai.losses import DiceCELoss
+from monai.losses import DiceCELoss, DiceFocalLoss, DiceLoss, FocalLoss
 from monai.networks.layers import Norm
 from monai.networks.nets import Unet
 from monai.utils import set_determinism
@@ -82,6 +82,18 @@ class TrainCfg:
     # optimizer
     lr: float = 1e-4
     weight_decay: float = 1e-4
+
+    # loss
+    loss_name: str = "dicece"  # dicece | dice | dicefocal | focal
+    loss_squared_pred: bool = True
+    loss_reduction: str = "mean"
+    loss_lambda_dice: float = 1.0
+    loss_lambda_ce: float = 1.0
+    loss_lambda_focal: float = 1.0
+    loss_gamma: float = 2.0
+    loss_alpha: float | None = None
+    loss_label_smoothing: float = 0.0
+    loss: Any | None = field(default=None, repr=False, compare=False)
 
     # OneCycleLR
     lr_max: float = 5e-4
@@ -168,18 +180,40 @@ def _extract_python_cfg(module: Any, path: Path) -> dict[str, Any]:
     raise TypeError(f"Unsupported cfg type in '{path}': {type(cfg_obj).__name__}")
 
 
+def _cfg_to_raw_dict(cfg: TrainCfg) -> dict[str, Any]:
+    return {f.name: getattr(cfg, f.name) for f in fields(cfg)}
+
+
+def _cfg_value_to_serializable(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.nn.Module):
+        return value.__class__.__name__
+    if isinstance(value, dict):
+        return {str(k): _cfg_value_to_serializable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_cfg_value_to_serializable(v) for v in value]
+    return str(value)
+
+
+def _cfg_to_serializable_dict(cfg: TrainCfg) -> dict[str, Any]:
+    return {k: _cfg_value_to_serializable(v) for k, v in _cfg_to_raw_dict(cfg).items()}
+
+
 def _save_run_config(cfg: TrainCfg, out_dir: Path, *, config_path: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     source_path = Path(config_path)
     saved_name = f"config{source_path.suffix.lower()}" if source_path.suffix else "config.txt"
     saved_path = out_dir / saved_name
     saved_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
-    (out_dir / "config.resolved.json").write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
+    (out_dir / "config.resolved.json").write_text(json.dumps(_cfg_to_serializable_dict(cfg), indent=2), encoding="utf-8")
     return saved_path
 
 
 def _write_resolved_runtime_config(out_dir: Path, cfg: TrainCfg, *, steps_per_epoch: int) -> dict[str, int | float | str]:
-    payload: dict[str, int | float | str] = dict(asdict(cfg))
+    payload: dict[str, Any] = dict(_cfg_to_serializable_dict(cfg))
     payload["steps_per_epoch"] = int(steps_per_epoch)
     payload["total_steps"] = int(steps_per_epoch) * int(cfg.epochs)
     payload["val_interval_steps"] = int(steps_per_epoch) * int(cfg.val_interval)
@@ -367,6 +401,55 @@ def _build_model(cfg: TrainCfg) -> torch.nn.Module:
         dropout=0.2,
         norm=Norm.BATCH,
     )
+
+
+def _build_loss(*, cfg: TrainCfg, cfg_module: Any) -> torch.nn.Module:
+    if cfg.loss is not None:
+        if not isinstance(cfg.loss, torch.nn.Module):
+            raise TypeError(f"cfg.loss must be torch.nn.Module, got {type(cfg.loss).__name__}")
+        return cfg.loss
+
+    build_loss = getattr(cfg_module, "build_loss", None)
+    if build_loss is not None:
+        loss_function = build_loss(cfg=cfg)
+        if not isinstance(loss_function, torch.nn.Module):
+            raise TypeError(f"build_loss(cfg=...) must return torch.nn.Module, got {type(loss_function).__name__}")
+        return loss_function
+
+    loss_name = str(cfg.loss_name).strip().lower()
+    common_kwargs = {
+        "sigmoid": True,
+        "squared_pred": bool(cfg.loss_squared_pred),
+        "reduction": str(cfg.loss_reduction),
+    }
+    alpha = None if cfg.loss_alpha is None else float(cfg.loss_alpha)
+
+    if loss_name == "dicece":
+        return DiceCELoss(
+            **common_kwargs,
+            lambda_dice=float(cfg.loss_lambda_dice),
+            lambda_ce=float(cfg.loss_lambda_ce),
+            label_smoothing=float(cfg.loss_label_smoothing),
+        )
+    if loss_name == "dice":
+        return DiceLoss(**common_kwargs)
+    if loss_name == "dicefocal":
+        return DiceFocalLoss(
+            **common_kwargs,
+            gamma=float(cfg.loss_gamma),
+            lambda_dice=float(cfg.loss_lambda_dice),
+            lambda_focal=float(cfg.loss_lambda_focal),
+            alpha=alpha,
+        )
+    if loss_name == "focal":
+        return FocalLoss(
+            to_onehot_y=False,
+            use_softmax=False,
+            gamma=float(cfg.loss_gamma),
+            alpha=alpha,
+            reduction=str(cfg.loss_reduction),
+        )
+    raise ValueError(f"Unsupported loss_name: {cfg.loss_name}")
 
 
 def _load_resume(
@@ -703,10 +786,10 @@ def main() -> None:
 
         # Params: resolved config (flat key/value).
         try:
-            mlflow.log_params({k: v for k, v in asdict(cfg).items()})
+            mlflow.log_params({k: v for k, v in _cfg_to_serializable_dict(cfg).items()})
         except Exception:
             # Fallback: best-effort stringification (MLflow params are strings).
-            mlflow.log_params({k: str(v) for k, v in asdict(cfg).items()})
+            mlflow.log_params({k: str(v) for k, v in _cfg_to_serializable_dict(cfg).items()})
 
         # Artifacts: configs/logs/splits/TB will be uploaded at end (and splits now).
         try:
@@ -800,7 +883,7 @@ def main() -> None:
     )
 
     model = _build_model(cfg)
-    loss_function = DiceCELoss(sigmoid=True, squared_pred=True, reduction="mean")
+    loss_function = _build_loss(cfg=cfg, cfg_module=cfg_module)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr), weight_decay=float(cfg.weight_decay))
     steps_per_epoch = max(1, len(train_loader))
     resolved_runtime_cfg = _write_resolved_runtime_config(out_dir, cfg, steps_per_epoch=int(steps_per_epoch))
@@ -828,6 +911,7 @@ def main() -> None:
     model, optimizer, train_loader, val_loader = accelerator.prepare(model, optimizer, train_loader, val_loader)
     loss_function = loss_function.to(accelerator.device)
 
+    logger.info("Loss: %s", loss_function.__class__.__name__)
     logger.info(
         "Schedule: steps_per_epoch=%d total_steps=%d val_interval_steps=%d val_vis_every_steps=%d",
         int(steps_per_epoch),

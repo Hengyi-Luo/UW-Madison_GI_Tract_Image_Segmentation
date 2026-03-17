@@ -56,6 +56,14 @@ class TrainCfg:
     output_dir: str = ""
     resume_from: str = ""
 
+    # cross-validation metadata
+    cv_enabled: bool = False
+    cv_id: str = ""
+    cv_fold: int = -1
+    cv_num_folds: int = 0
+    cv_scheme: str = ""
+    cv_group_by: str = ""
+
     # tracking
     # If true: enforce clean git worktree and log params/metrics/artifacts to MLflow.
     use_mlflow: bool = False
@@ -167,6 +175,10 @@ def _resolve_output_dir(cfg: TrainCfg) -> Path:
         return Path(cfg.output_dir)
     ts = time.strftime("%Y%m%d-%H%M%S")
     return Path("outputs") / f"{ts}_{cfg.model_name}"
+
+
+def _cv_enabled(cfg: TrainCfg) -> bool:
+    return bool(cfg.cv_enabled) or bool(str(cfg.cv_id).strip()) or int(cfg.cv_num_folds) > 0 or int(cfg.cv_fold) >= 0
 
 
 def _extract_python_cfg(module: Any, path: Path) -> dict[str, Any]:
@@ -783,6 +795,18 @@ def main() -> None:
                     mlflow.set_tag(f"{split_key}.sha256", _sha256_file(p))
             except Exception:
                 pass
+        if _cv_enabled(cfg):
+            mlflow.set_tag("cv.enabled", "true")
+            if str(cfg.cv_id).strip():
+                mlflow.set_tag("cv.id", str(cfg.cv_id))
+            if int(cfg.cv_fold) >= 0:
+                mlflow.set_tag("cv.fold", str(int(cfg.cv_fold)))
+            if int(cfg.cv_num_folds) > 0:
+                mlflow.set_tag("cv.num_folds", str(int(cfg.cv_num_folds)))
+            if str(cfg.cv_scheme).strip():
+                mlflow.set_tag("cv.scheme", str(cfg.cv_scheme))
+            if str(cfg.cv_group_by).strip():
+                mlflow.set_tag("cv.group_by", str(cfg.cv_group_by))
 
         # Params: resolved config (flat key/value).
         try:
@@ -803,6 +827,16 @@ def main() -> None:
     accelerator = Accelerator(mixed_precision=str(cfg.mixed_precision))
     logger.info("Device: %s | mixed_precision=%s", str(accelerator.device), str(cfg.mixed_precision))
     logger.info("Output: %s", str(out_dir))
+    if _cv_enabled(cfg):
+        logger.info(
+            "CV: enabled=%s id=%s fold=%d/%d scheme=%s group_by=%s",
+            str(bool(cfg.cv_enabled)).lower(),
+            str(cfg.cv_id),
+            int(cfg.cv_fold),
+            int(cfg.cv_num_folds),
+            str(cfg.cv_scheme),
+            str(cfg.cv_group_by),
+        )
 
     # For saving space: log static vis (raw/gt) only once per tag.
     logged_static_vis_tags: set[str] = set()

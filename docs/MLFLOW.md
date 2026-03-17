@@ -55,6 +55,13 @@ mlflow ui --backend-store-uri sqlite:///$(pwd)/mlflow.db --host 0.0.0.0 --port 5
   - `config.path`, `config.sha256` (the YAML used)
   - `split.train.path`, `split.train.sha256`, `split.val.path`, `split.val.sha256` (when split files exist)
   - `summary/best_metric_epoch` (written at the end of training)
+  - Cross-validation tags when enabled:
+    - `cv.enabled`
+    - `cv.id`
+    - `cv.fold`
+    - `cv.num_folds`
+    - `cv.scheme`
+    - `cv.group_by`
 
 ### Metrics (logged per epoch)
 
@@ -114,3 +121,32 @@ use_mlflow: true
 ```
 
 If `resume_from` is empty, or `mlflow_run_id.txt` is missing next to the checkpoint, a new MLflow run is created.
+
+## K-fold workflow
+
+For K-fold CV, use one MLflow run per fold and share the same `cv_id` across all folds.
+
+Recommended config fields:
+```python
+cfg.cv_enabled = True
+cfg.cv_id = "ref_aug_k5_seed42"
+cfg.cv_fold = 0
+cfg.cv_num_folds = 5
+cfg.cv_scheme = "GroupKFold"
+cfg.cv_group_by = "case"
+```
+
+After all fold runs finish, aggregate them with:
+
+```bash
+python scripts/aggregate_cv_results.py \
+  --experiment-name uwgi/segmentation \
+  --cv-id ref_aug_k5_seed42 \
+  --log-summary-run
+```
+
+This writes:
+- `outputs/cv_summary/<cv_id>/fold_metrics.csv`
+- `outputs/cv_summary/<cv_id>/summary.json`
+
+And, when `--log-summary-run` is set, creates one additional MLflow run named `cv_summary_<cv_id>` with aggregate metrics/artifacts.

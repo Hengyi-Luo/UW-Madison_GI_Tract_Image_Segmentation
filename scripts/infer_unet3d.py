@@ -8,7 +8,7 @@ Also optionally computes case_day-level Dice evaluation and summary (when `evalu
 GT masks from inputs/train.csv.
 
 Usage:
-  python scripts/infer_unet3d.py --config configs/infer_unet3d.yaml
+  python scripts/infer_unet3d.py --config configs/infer_unet3d.py
 
 Default output:
   <weights_parent>/infer/submit.csv
@@ -22,19 +22,22 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 import argparse
 import csv
+import importlib.util
 import json
 import math
 import os
 import sys
 from typing import Any
 
+import nibabel as nib
+import numpy as np
 import torch
 import yaml
 from monai.data import DataLoader, Dataset
 from monai.inferers import sliding_window_inference
 from monai.networks.layers import Norm
 from monai.networks.nets import Unet
-from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, ScaleIntensityd, SpatialPadd
+from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, Lambdad, ScaleIntensityd, SpatialPadd
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +63,8 @@ class InferCfg:
     output_dir: str = ""  # default: <weights_parent>/infer
 
     out_csv_name: str = "submit.csv"
+    export_pred_nifti: bool = False
+    pred_nifti_dir_name: str = "pred_nifti"
 
     evaluate: bool = True
     eval_per_case_name: str = "eval_per_case.csv"
@@ -71,6 +76,8 @@ class InferCfg:
     sw_batch_size: int = 4
     overlap: float = 0.25
     threshold: float = 0.5
+    intensity_norm: str = "scale_intensity"
+    pad_to_roi: bool = True
 
     num_workers: int = 0
     device: str = ""
@@ -86,11 +93,43 @@ class InferCfg:
         return bool(self.evaluate)
 
 
+def _load_python_module(path: Path, *, module_name: str):
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    if not path.exists():
+        raise FileNotFoundError(f"Python module not found: {path}")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load Python module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _extract_python_cfg(module: Any, path: Path) -> dict[str, Any]:
+    cfg_obj = getattr(module, "cfg", None)
+    if cfg_obj is None:
+        raise AttributeError(f"Python config '{path}' must define a top-level 'cfg'")
+    if isinstance(cfg_obj, dict):
+        return dict(cfg_obj)
+    if hasattr(cfg_obj, "__dict__"):
+        return {k: v for k, v in vars(cfg_obj).items() if not k.startswith("_")}
+    raise TypeError(f"Unsupported cfg type in '{path}': {type(cfg_obj).__name__}")
+
+
 def _load_cfg(path: str) -> InferCfg:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    if not isinstance(raw, dict):
-        raise ValueError("Config YAML must be a mapping at the top level.")
+    cfg_path = Path(path)
+    suffix = cfg_path.suffix.lower()
+    if suffix == ".py":
+        module = _load_python_module(cfg_path, module_name="infer_unet3d_config")
+        raw = _extract_python_cfg(module, cfg_path)
+    elif suffix in {".yaml", ".yml"}:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        if not isinstance(raw, dict):
+            raise ValueError("Config YAML must be a mapping at the top level.")
+    else:
+        raise ValueError(f"Config must be a Python module (.py) or YAML (.yaml/.yml), got: {cfg_path}")
 
     known = set(InferCfg().__dict__.keys())
     unknown = sorted([k for k in raw.keys() if k not in known])
@@ -114,32 +153,56 @@ def _build_model(device: torch.device) -> torch.nn.Module:
     ).to(device)
 
 
-def _get_infer_transforms(*, patch_d: int, patch_h: int, patch_w: int, case_day_slices):
-    return Compose(
-        [
-            LoadCaseDayImaged(keys=["case_day"], case_day_slices=case_day_slices),
-            EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-            ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
-            SpatialPadd(keys=["image"], spatial_size=(int(patch_d), int(patch_h), int(patch_w)), mode="constant"),
-            EnsureTyped(keys=["image"]),
-        ]
-    )
+def _safe_unit_scale(x: np.ndarray) -> np.ndarray:
+    max_value = float(np.max(x))
+    if max_value <= 0.0:
+        return x.astype(np.float32)
+    return (x / max_value).astype(np.float32)
 
 
-def _get_eval_transforms(*, patch_d: int, patch_h: int, patch_w: int, case_day_slices, rle_index):
-    return Compose(
-        [
-            LoadCaseDayVolumed(keys=["case_day"], case_day_slices=case_day_slices, rle_index=rle_index),
-            EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-            ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
+def _get_intensity_transform(norm_name: str):
+    norm_name = str(norm_name).strip().lower()
+    if norm_name == "scale_intensity":
+        return ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0)
+    if norm_name == "safe_unit_scale":
+        return Lambdad(keys=["image"], func=_safe_unit_scale)
+    raise ValueError(f"Unsupported intensity_norm: {norm_name}")
+
+
+def _get_infer_transforms(*, cfg: InferCfg, case_day_slices):
+    transforms: list[Any] = [
+        LoadCaseDayImaged(keys=["case_day"], case_day_slices=case_day_slices),
+        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+        _get_intensity_transform(cfg.intensity_norm),
+    ]
+    if bool(cfg.pad_to_roi):
+        transforms.append(
+            SpatialPadd(
+                keys=["image"],
+                spatial_size=(int(cfg.roi_d), int(cfg.roi_h), int(cfg.roi_w)),
+                mode="constant",
+            )
+        )
+    transforms.append(EnsureTyped(keys=["image"], dtype=torch.float32))
+    return Compose(transforms)
+
+
+def _get_eval_transforms(*, cfg: InferCfg, case_day_slices, rle_index):
+    transforms: list[Any] = [
+        LoadCaseDayVolumed(keys=["case_day"], case_day_slices=case_day_slices, rle_index=rle_index),
+        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+        _get_intensity_transform(cfg.intensity_norm),
+    ]
+    if bool(cfg.pad_to_roi):
+        transforms.append(
             SpatialPadd(
                 keys=["image", "label"],
-                spatial_size=(int(patch_d), int(patch_h), int(patch_w)),
+                spatial_size=(int(cfg.roi_d), int(cfg.roi_h), int(cfg.roi_w)),
                 mode="constant",
-            ),
-            EnsureTyped(keys=["image", "label"]),
-        ]
-    )
+            )
+        )
+    transforms.append(EnsureTyped(keys=["image", "label"], dtype=torch.float32))
+    return Compose(transforms)
 
 
 def _load_checkpoint(weights_path: str, device: torch.device, *, unsafe_load: bool) -> dict[str, Any]:
@@ -182,6 +245,41 @@ def _write_submit_csv(path: Path, rows: list[dict[str, str]]) -> None:
         w.writerows(rows)
 
 
+def _parse_scan_filename(filename: str) -> tuple[int, int, int, float, float]:
+    stem = Path(filename).stem
+    parts = stem.split("_")
+    if len(parts) < 6:
+        raise ValueError(f"Unexpected scan filename: {filename}")
+    return int(parts[1]), int(parts[3]), int(parts[2]), float(parts[4]), float(parts[5])
+
+
+def _save_nifti(path: Path, volume_zyx: np.ndarray, spacing_xyz: tuple[float, float, float]) -> None:
+    affine = np.diag([spacing_xyz[0], spacing_xyz[1], spacing_xyz[2], 1.0]).astype(np.float32)
+    image = nib.Nifti1Image(np.transpose(volume_zyx, (2, 1, 0)), affine)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(image, str(path))
+
+
+def _export_pred_masks_nifti(
+    *,
+    out_dir: Path,
+    dir_name: str,
+    case_day: str,
+    pred_cdhw: np.ndarray,
+    case_day_slices: dict[str, list[str]],
+) -> None:
+    slice_paths = case_day_slices.get(case_day)
+    if not slice_paths:
+        raise KeyError(f"Missing slice paths for case_day: {case_day}")
+    _, _, _, spacing_x, spacing_y = _parse_scan_filename(Path(slice_paths[0]).name)
+    spacing = (float(spacing_x), float(spacing_y), float(spacing_x))
+
+    case_dir = out_dir / str(dir_name) / case_day
+    for ci, cls_name in enumerate(CLASSES):
+        mask_path = case_dir / f"{case_day}_mask_{cls_name}.nii.gz"
+        _save_nifti(mask_path, pred_cdhw[ci].astype(np.uint8), spacing)
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
@@ -194,12 +292,17 @@ def _json_safe(value: Any) -> Any:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
-    p.add_argument("--config", type=str, default="configs/infer_unet3d.yaml")
+    p.add_argument("--config", type=str, default="configs/infer_unet3d.py")
     p.add_argument("--weights", type=str, default="", help="Override cfg.weights")
     p.add_argument("--ids_csv", type=str, default="", help="Override cfg.ids_csv")
     p.add_argument("--output_dir", type=str, default="", help="Override cfg.output_dir")
     p.add_argument("--device", type=str, default="", help="Override cfg.device")
     p.add_argument("--num_workers", type=int, default=None, help="Override cfg.num_workers")
+    p.add_argument(
+        "--export-pred-nifti",
+        action="store_true",
+        help="Also export one predicted mask NIfTI per class and case_day.",
+    )
     p.add_argument(
         "--unsafe_load",
         action="store_true",
@@ -222,6 +325,8 @@ def main() -> None:
         cfg = InferCfg(**{**asdict(cfg), "device": args.device})
     if args.num_workers is not None:
         cfg = InferCfg(**{**asdict(cfg), "num_workers": int(args.num_workers)})
+    if args.export_pred_nifti:
+        cfg = InferCfg(**{**asdict(cfg), "export_pred_nifti": True})
     if args.unsafe_load:
         cfg = InferCfg(**{**asdict(cfg), "unsafe_load": True})
 
@@ -264,17 +369,13 @@ def main() -> None:
         print("Building RLE index (for evaluation)...")
         rle_index = build_rle_index(cfg.train_csv)
         infer_transforms = _get_eval_transforms(
-            patch_d=int(cfg.roi_d),
-            patch_h=int(cfg.roi_h),
-            patch_w=int(cfg.roi_w),
+            cfg=cfg,
             case_day_slices=case_day_slices,
             rle_index=rle_index,
         )
     else:
         infer_transforms = _get_infer_transforms(
-            patch_d=int(cfg.roi_d),
-            patch_h=int(cfg.roi_h),
-            patch_w=int(cfg.roi_w),
+            cfg=cfg,
             case_day_slices=case_day_slices,
         )
 
@@ -331,6 +432,15 @@ def main() -> None:
             pred = (probs > thr).to(torch.uint8)  # (1,C,D,H,W)
 
             pred_cdhw = pred[0, :, :orig_d, :orig_h, :orig_w].detach().cpu().numpy()
+
+            if bool(cfg.export_pred_nifti):
+                _export_pred_masks_nifti(
+                    out_dir=out_dir,
+                    dir_name=str(cfg.pred_nifti_dir_name),
+                    case_day=case_day,
+                    pred_cdhw=pred_cdhw,
+                    case_day_slices=case_day_slices,
+                )
 
             if cfg.eval_enabled:
                 y = batch["label"].to(device).to(torch.uint8)  # (1,C,D,H,W)
@@ -393,10 +503,14 @@ def main() -> None:
         "sw_batch_size": int(sw_batch_size),
         "overlap": float(overlap),
         "output_csv": str(out_csv),
+        "export_pred_nifti": bool(cfg.export_pred_nifti),
+        "pred_nifti_dir": str(out_dir / str(cfg.pred_nifti_dir_name)),
     }
     (out_dir / "infer_summary.json").write_text(json.dumps(_json_safe(summary), indent=2) + "\n", encoding="utf-8")
 
     print(f"Wrote submission CSV: {out_csv}")
+    if bool(cfg.export_pred_nifti):
+        print(f"Wrote predicted masks: {out_dir / str(cfg.pred_nifti_dir_name)}")
     if cfg.eval_enabled:
         print(f"Wrote eval per-case : {out_dir / str(cfg.eval_per_case_name)}")
         print(f"Wrote eval summary  : {out_dir / str(cfg.eval_summary_name)}")

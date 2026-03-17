@@ -1,6 +1,13 @@
 from types import SimpleNamespace
 
-from monai.transforms import Compose, EnsureChannelFirstd, EnsureTyped, RandSpatialCropd, ScaleIntensityd, SpatialPadd
+from monai.transforms import (
+    Compose, 
+    EnsureChannelFirstd, 
+    EnsureTyped, 
+    RandSpatialCropd, 
+    ScaleIntensityd, 
+    SpatialPadd
+)
 
 from src.datasets import LoadCaseDayVolumed
 

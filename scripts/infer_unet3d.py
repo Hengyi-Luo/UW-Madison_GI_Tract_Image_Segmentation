@@ -32,7 +32,6 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import torch
-import yaml
 from monai.data import DataLoader, Dataset
 from monai.inferers import sliding_window_inference
 from monai.networks.layers import Norm
@@ -182,16 +181,10 @@ def _extract_python_cfg(module: Any, path: Path) -> dict[str, Any]:
 def _load_cfg(path: str) -> InferCfg:
     cfg_path = Path(path)
     suffix = cfg_path.suffix.lower()
-    if suffix == ".py":
-        module = _load_python_module(cfg_path, module_name="infer_unet3d_config")
-        raw = _extract_python_cfg(module, cfg_path)
-    elif suffix in {".yaml", ".yml"}:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-        if not isinstance(raw, dict):
-            raise ValueError("Config YAML must be a mapping at the top level.")
-    else:
-        raise ValueError(f"Config must be a Python module (.py) or YAML (.yaml/.yml), got: {cfg_path}")
+    if suffix != ".py":
+        raise ValueError(f"Config must be a Python module (.py), got: {cfg_path}")
+    module = _load_python_module(cfg_path, module_name="infer_unet3d_config")
+    raw = _extract_python_cfg(module, cfg_path)
 
     known = set(InferCfg().__dict__.keys())
     unknown = sorted([k for k in raw.keys() if k not in known])
@@ -513,7 +506,7 @@ def main() -> None:
 
     (out_dir / "config.resolved.json").write_text(json.dumps(asdict(cfg), indent=2) + "\n", encoding="utf-8")
     if args.config and os.path.exists(args.config):
-        (out_dir / "config.yaml").write_text(Path(args.config).read_text(encoding="utf-8"), encoding="utf-8")
+        (out_dir / "config.py").write_text(Path(args.config).read_text(encoding="utf-8"), encoding="utf-8")
 
     device = torch.device(cfg.device) if cfg.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")

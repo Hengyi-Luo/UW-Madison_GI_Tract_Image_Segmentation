@@ -13,8 +13,6 @@ import subprocess
 import sys
 from typing import Any
 
-import yaml
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -61,9 +59,46 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+def _to_python_literal(value: Any) -> str:
+    if isinstance(value, Path):
+        return repr(str(value))
+    return repr(value)
+
+
+def _write_infer_config(
+    *,
+    base_config: Path,
+    out_path: Path,
+    weights: list[str],
+    output_dir: Path,
+    sw_batch_size: int,
+    device: str,
+) -> None:
+    weights_value: str
+    resolved_weights = [str(Path(w).resolve()) for w in weights]
+    if len(resolved_weights) == 1:
+        weights_value = _to_python_literal(resolved_weights[0])
+    else:
+        weights_value = "[" + ", ".join(_to_python_literal(x) for x in resolved_weights) + "]"
+    device_value = _to_python_literal(str(device)) if device else "cfg.device"
+    content = f"""from pathlib import Path
+from types import SimpleNamespace
+import importlib.util
+
+_BASE_PATH = Path(r\"{str(base_config.resolve())}\")
+_SPEC = importlib.util.spec_from_file_location(\"_base_infer_cfg\", _BASE_PATH)
+if _SPEC is None or _SPEC.loader is None:
+    raise ImportError(f\"Failed to load base infer config: {{_BASE_PATH}}\")
+_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_MODULE)
+
+cfg = SimpleNamespace(**{{k: v for k, v in vars(_MODULE.cfg).items() if not k.startswith(\"_\")}})
+cfg.weights = {weights_value}
+cfg.output_dir = { _to_python_literal(str(output_dir.resolve())) }
+cfg.sw_batch_size = {int(sw_batch_size)}
+cfg.device = {device_value}
+"""
+    _write_text(out_path, content)
 
 
 def _write_seed_train_config(
@@ -96,23 +131,6 @@ if hasattr(_MODULE, \"build_loss\"):
     build_loss = _MODULE.build_loss
 """
     _write_text(out_path, content)
-
-
-def _build_infer_payload(
-    *,
-    base_payload: dict[str, Any],
-    weights: list[str],
-    output_dir: Path,
-    sw_batch_size: int,
-    device: str,
-) -> dict[str, Any]:
-    payload = dict(base_payload)
-    payload["weights"] = weights[0] if len(weights) == 1 else [str(Path(w).resolve()) for w in weights]
-    payload["output_dir"] = str(output_dir.resolve())
-    payload["sw_batch_size"] = int(sw_batch_size)
-    if device:
-        payload["device"] = str(device)
-    return payload
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -249,8 +267,8 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run pure self-training multi-seed optimization and ensemble selection.")
-    parser.add_argument("--train-config", default="configs/train_unet3d_score_long.py")
-    parser.add_argument("--infer-config", default="configs/infer_unet3d_score_engineering.yaml")
+    parser.add_argument("--train-config", default="configs/train_unet3d_reference_loss.py")
+    parser.add_argument("--infer-config", default="configs/infer_unet3d_score_engineering.py")
     parser.add_argument("--output-root", default="outputs/selftrain_score_multiseed")
     parser.add_argument("--seeds", default="17,42,2026,3407")
     parser.add_argument("--device", default="")
@@ -273,7 +291,7 @@ def main() -> None:
 
     seeds = _parse_seeds(args.seeds)
     train_cfg_raw = _load_python_cfg(base_train_config)
-    infer_cfg_raw = yaml.safe_load(base_infer_config.read_text(encoding="utf-8")) or {}
+    infer_cfg_raw = _load_python_cfg(base_infer_config)
 
     current_train_sw_batch_size = int(train_cfg_raw.get("sw_batch_size", 2))
     current_infer_sw_batch_size = int(infer_cfg_raw.get("sw_batch_size", 2))
@@ -283,15 +301,15 @@ def main() -> None:
         benchmark_weight = Path(args.benchmark_weight)
         if benchmark_weight.exists():
             benchmark_out_dir = output_root / "benchmark_existing_best"
-            benchmark_cfg_path = runtime_infer_dir / "benchmark_existing_best.yaml"
-            benchmark_payload = _build_infer_payload(
-                base_payload=infer_cfg_raw,
+            benchmark_cfg_path = runtime_infer_dir / "benchmark_existing_best.py"
+            _write_infer_config(
+                base_config=base_infer_config,
+                out_path=benchmark_cfg_path,
                 weights=[str(benchmark_weight)],
                 output_dir=benchmark_out_dir,
                 sw_batch_size=current_infer_sw_batch_size,
                 device=str(args.device),
             )
-            _write_yaml(benchmark_cfg_path, benchmark_payload)
             benchmark_summary_path = benchmark_out_dir / "eval_summary.json"
             if benchmark_summary_path.exists():
                 benchmark_summary = _load_json(benchmark_summary_path)
@@ -331,15 +349,15 @@ def main() -> None:
             current_infer_sw_batch_size = 1
 
         infer_out_dir = run_dir / "infer_score"
-        infer_cfg_path = runtime_infer_dir / f"infer_seed_{int(seed):04d}.yaml"
-        infer_payload = _build_infer_payload(
-            base_payload=infer_cfg_raw,
+        infer_cfg_path = runtime_infer_dir / f"infer_seed_{int(seed):04d}.py"
+        _write_infer_config(
+            base_config=base_infer_config,
+            out_path=infer_cfg_path,
             weights=[str(best_ckpt)],
             output_dir=infer_out_dir,
             sw_batch_size=current_infer_sw_batch_size,
             device=str(args.device),
         )
-        _write_yaml(infer_cfg_path, infer_payload)
         _run([PYTHON, "scripts/infer_unet3d.py", "--config", str(infer_cfg_path)])
         eval_summary = _load_json(infer_out_dir / "eval_summary.json")
 
@@ -365,15 +383,15 @@ def main() -> None:
                 continue
             candidate_name = f"{base_name}__{'__'.join(row['name'] for row in rows)}"
             candidate_out_dir = output_root / "candidate_evals" / candidate_name
-            candidate_cfg_path = runtime_infer_dir / f"{candidate_name}.yaml"
-            candidate_payload = _build_infer_payload(
-                base_payload=infer_cfg_raw,
+            candidate_cfg_path = runtime_infer_dir / f"{candidate_name}.py"
+            _write_infer_config(
+                base_config=base_infer_config,
+                out_path=candidate_cfg_path,
                 weights=weights,
                 output_dir=candidate_out_dir,
                 sw_batch_size=current_infer_sw_batch_size,
                 device=str(args.device),
             )
-            _write_yaml(candidate_cfg_path, candidate_payload)
             _run([PYTHON, "scripts/infer_unet3d.py", "--config", str(candidate_cfg_path)])
             candidate_summary = _load_json(candidate_out_dir / "eval_summary.json")
             candidate_row = {
@@ -409,15 +427,15 @@ def main() -> None:
 
     final_config_path: str | None = None
     if best_candidate is not None:
-        final_payload = _build_infer_payload(
-            base_payload=infer_cfg_raw,
+        final_config = output_root / "final_infer_config.py"
+        _write_infer_config(
+            base_config=base_infer_config,
+            out_path=final_config,
             weights=[str(w) for w in best_candidate["weights"]],
             output_dir=output_root / "final_selected",
             sw_batch_size=current_infer_sw_batch_size,
             device=str(args.device),
         )
-        final_config = output_root / "final_infer_config.yaml"
-        _write_yaml(final_config, final_payload)
         final_config_path = str(final_config.resolve())
 
     seed_csv_rows = []

@@ -18,7 +18,7 @@ Default output:
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import argparse
 import csv
@@ -59,7 +59,7 @@ class InferCfg:
     ids_csv: str = "inputs/splits/val_case_days.csv"
     train_csv: str = "inputs/train.csv"
 
-    weights: str = ""
+    weights: str | list[str] = ""
     output_dir: str = ""  # default: <weights_parent>/infer
 
     out_csv_name: str = "submit.csv"
@@ -75,7 +75,10 @@ class InferCfg:
     roi_w: int = 224
     sw_batch_size: int = 4
     overlap: float = 0.25
+    sw_mode: str = "constant"  # constant | gaussian
+    sw_sigma_scale: float = 0.125
     threshold: float = 0.5
+    tta_flips: list[list[int]] = field(default_factory=list)  # spatial axes relative to (D,H,W)
     intensity_norm: str = "scale_intensity"
     pad_to_roi: bool = True
 
@@ -91,6 +94,65 @@ class InferCfg:
     @property
     def eval_enabled(self) -> bool:
         return bool(self.evaluate)
+
+    @property
+    def weight_paths(self) -> list[str]:
+        if isinstance(self.weights, str):
+            return [self.weights] if self.weights else []
+        return [str(x) for x in self.weights if str(x).strip()]
+
+
+def _normalize_weight_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                decoded = json.loads(text)
+            except Exception:
+                decoded = None
+            if isinstance(decoded, list):
+                return [str(x).strip() for x in decoded if str(x).strip()]
+        if "," in text:
+            return [part.strip() for part in text.split(",") if part.strip()]
+        return [text]
+    return [str(value).strip()]
+
+
+def _normalize_tta_flips(value: Any) -> list[list[int]]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        decoded = json.loads(text)
+        value = decoded
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"tta_flips must be a list of spatial-axis lists, got {type(value).__name__}")
+    flips: list[list[int]] = []
+    for axes in value:
+        if isinstance(axes, (list, tuple)):
+            flip_axes = [int(axis) for axis in axes]
+            if flip_axes:
+                flips.append(flip_axes)
+        else:
+            flips.append([int(axes)])
+    return flips
+
+
+def _normalize_infer_cfg_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(raw)
+    weight_list = _normalize_weight_list(normalized.get("weights", ""))
+    normalized["weights"] = weight_list[0] if len(weight_list) == 1 else weight_list
+    normalized["tta_flips"] = _normalize_tta_flips(normalized.get("tta_flips", []))
+    normalized["sw_mode"] = str(normalized.get("sw_mode", "constant")).strip().lower()
+    return normalized
 
 
 def _load_python_module(path: Path, *, module_name: str):
@@ -137,7 +199,14 @@ def _load_cfg(path: str) -> InferCfg:
         raise ValueError(f"Unknown config keys: {unknown}")
 
     merged = {**InferCfg().__dict__, **raw}
+    merged = _normalize_infer_cfg_raw(merged)
     return InferCfg(**merged)
+
+
+def _apply_cfg_overrides(cfg: InferCfg, **overrides: Any) -> InferCfg:
+    raw = {**asdict(cfg), **overrides}
+    raw = _normalize_infer_cfg_raw(raw)
+    return InferCfg(**raw)
 
 
 def _build_model(device: torch.device) -> torch.nn.Module:
@@ -229,12 +298,28 @@ def _load_checkpoint(weights_path: str, device: torch.device, *, unsafe_load: bo
     return ckpt
 
 
+def _extract_state_dict(ckpt: dict[str, Any]) -> dict[str, Any]:
+    if "model_state_dict" in ckpt:
+        state_dict = ckpt["model_state_dict"]
+    elif "model" in ckpt:
+        state_dict = ckpt["model"]
+    else:
+        raise ValueError("Unrecognized checkpoint format: expected model_state_dict or model keys.")
+    if not isinstance(state_dict, dict):
+        raise ValueError("Checkpoint model payload must be a state dict.")
+    return state_dict
+
+
 def _resolve_output_dir(cfg: InferCfg) -> Path:
     if cfg.output_dir:
         return Path(cfg.output_dir)
-    if not cfg.weights:
+    weight_paths = cfg.weight_paths
+    if not weight_paths:
         raise ValueError("weights must be set (either in config or via --weights).")
-    return Path(cfg.weights).resolve().parent / "infer"
+    base_dir = Path(weight_paths[0]).resolve().parent
+    if len(weight_paths) == 1:
+        return base_dir / "infer"
+    return base_dir / f"infer_ensemble_{len(weight_paths)}"
 
 
 def _write_submit_csv(path: Path, rows: list[dict[str, str]]) -> None:
@@ -290,6 +375,90 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _spatial_axes_to_tensor_dims(spatial_axes: list[int]) -> list[int]:
+    dims: list[int] = []
+    for axis in spatial_axes:
+        axis = int(axis)
+        if axis < 0 or axis > 2:
+            raise ValueError(f"tta spatial axis must be one of 0, 1, 2 for (D,H,W), got: {axis}")
+        dims.append(axis + 2)
+    return dims
+
+
+def _sliding_window_logits(
+    *,
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    roi_size: tuple[int, int, int],
+    sw_batch_size: int,
+    overlap: float,
+    sw_mode: str,
+    sw_sigma_scale: float,
+) -> torch.Tensor:
+    kwargs: dict[str, Any] = {
+        "roi_size": roi_size,
+        "sw_batch_size": int(sw_batch_size),
+        "predictor": model,
+        "overlap": float(overlap),
+    }
+    if str(sw_mode).strip().lower() == "gaussian":
+        kwargs["mode"] = "gaussian"
+        kwargs["sigma_scale"] = float(sw_sigma_scale)
+    else:
+        kwargs["mode"] = "constant"
+    return sliding_window_inference(x, **kwargs)
+
+
+def _predict_probs(
+    *,
+    model: torch.nn.Module,
+    state_dicts: list[dict[str, Any]],
+    x: torch.Tensor,
+    roi_size: tuple[int, int, int],
+    sw_batch_size: int,
+    overlap: float,
+    sw_mode: str,
+    sw_sigma_scale: float,
+    tta_flips: list[list[int]],
+) -> torch.Tensor:
+    probs_sum: torch.Tensor | None = None
+    num_predictions = 0
+    for state_dict in state_dicts:
+        model.load_state_dict(state_dict)
+        logits = _sliding_window_logits(
+            model=model,
+            x=x,
+            roi_size=roi_size,
+            sw_batch_size=sw_batch_size,
+            overlap=overlap,
+            sw_mode=sw_mode,
+            sw_sigma_scale=sw_sigma_scale,
+        )
+        probs = torch.sigmoid(logits)
+        probs_sum = probs if probs_sum is None else probs_sum + probs
+        num_predictions += 1
+
+        for spatial_axes in tta_flips:
+            flip_dims = _spatial_axes_to_tensor_dims(spatial_axes)
+            flip_logits = _sliding_window_logits(
+                model=model,
+                x=torch.flip(x, dims=flip_dims),
+                roi_size=roi_size,
+                sw_batch_size=sw_batch_size,
+                overlap=overlap,
+                sw_mode=sw_mode,
+                sw_sigma_scale=sw_sigma_scale,
+            )
+            flip_probs = torch.sigmoid(flip_logits)
+            flip_probs = torch.flip(flip_probs, dims=flip_dims)
+            probs_sum = flip_probs if probs_sum is None else probs_sum + flip_probs
+            num_predictions += 1
+
+    if probs_sum is None or num_predictions <= 0:
+        raise RuntimeError("No predictions were produced during inference.")
+    return probs_sum / float(num_predictions)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     p.add_argument("--config", type=str, default="configs/infer_unet3d.py")
@@ -316,24 +485,26 @@ def main() -> None:
 
     cfg = _load_cfg(args.config) if args.config and os.path.exists(args.config) else InferCfg()
     if args.weights:
-        cfg = InferCfg(**{**asdict(cfg), "weights": args.weights})
+        cfg = _apply_cfg_overrides(cfg, weights=args.weights)
     if args.ids_csv:
-        cfg = InferCfg(**{**asdict(cfg), "ids_csv": args.ids_csv})
+        cfg = _apply_cfg_overrides(cfg, ids_csv=args.ids_csv)
     if args.output_dir:
-        cfg = InferCfg(**{**asdict(cfg), "output_dir": args.output_dir})
+        cfg = _apply_cfg_overrides(cfg, output_dir=args.output_dir)
     if args.device:
-        cfg = InferCfg(**{**asdict(cfg), "device": args.device})
+        cfg = _apply_cfg_overrides(cfg, device=args.device)
     if args.num_workers is not None:
-        cfg = InferCfg(**{**asdict(cfg), "num_workers": int(args.num_workers)})
+        cfg = _apply_cfg_overrides(cfg, num_workers=int(args.num_workers))
     if args.export_pred_nifti:
-        cfg = InferCfg(**{**asdict(cfg), "export_pred_nifti": True})
+        cfg = _apply_cfg_overrides(cfg, export_pred_nifti=True)
     if args.unsafe_load:
-        cfg = InferCfg(**{**asdict(cfg), "unsafe_load": True})
+        cfg = _apply_cfg_overrides(cfg, unsafe_load=True)
 
-    if not cfg.weights:
+    weight_paths = cfg.weight_paths
+    if not weight_paths:
         raise ValueError("Missing weights. Set it in config or pass --weights.")
-    if not os.path.exists(cfg.weights):
-        raise FileNotFoundError(f"Weights not found: {cfg.weights}")
+    for weight_path in weight_paths:
+        if not os.path.exists(weight_path):
+            raise FileNotFoundError(f"Weights not found: {weight_path}")
     if not os.path.exists(cfg.ids_csv):
         raise FileNotFoundError(f"ids_csv not found: {cfg.ids_csv}")
 
@@ -399,19 +570,18 @@ def main() -> None:
             infer_loader = _make_loader(0)
 
     model = _build_model(device)
-    ckpt = _load_checkpoint(cfg.weights, device, unsafe_load=bool(cfg.unsafe_load))
-    if "model_state_dict" in ckpt:
-        model.load_state_dict(ckpt["model_state_dict"])
-    elif "model" in ckpt:
-        model.load_state_dict(ckpt["model"])
-    else:
-        raise ValueError("Unrecognized checkpoint format: expected model_state_dict or model keys.")
+    state_dicts = [
+        _extract_state_dict(_load_checkpoint(weight_path, device, unsafe_load=bool(cfg.unsafe_load)))
+        for weight_path in weight_paths
+    ]
     model.eval()
 
     roi_size = cfg.roi_size
     sw_batch_size = int(cfg.sw_batch_size)
     overlap = float(cfg.overlap)
     thr = float(cfg.threshold)
+    sw_mode = str(cfg.sw_mode).strip().lower()
+    sw_sigma_scale = float(cfg.sw_sigma_scale)
 
     rows: list[dict[str, str]] = []
     with torch.no_grad():
@@ -421,14 +591,17 @@ def main() -> None:
             orig_d, orig_h, orig_w = [int(t.item()) for t in batch["orig_shape"]]
             slice_idxs = [int(t.item()) for t in batch["slice_idxs"]]
 
-            logits = sliding_window_inference(
-                x,
+            probs = _predict_probs(
+                model=model,
+                state_dicts=state_dicts,
+                x=x,
                 roi_size=roi_size,
                 sw_batch_size=sw_batch_size,
-                predictor=model,
                 overlap=overlap,
+                sw_mode=sw_mode,
+                sw_sigma_scale=sw_sigma_scale,
+                tta_flips=cfg.tta_flips,
             )
-            probs = torch.sigmoid(logits)
             pred = (probs > thr).to(torch.uint8)  # (1,C,D,H,W)
 
             pred_cdhw = pred[0, :, :orig_d, :orig_h, :orig_w].detach().cpu().numpy()
@@ -475,7 +648,7 @@ def main() -> None:
         eval_summary = {
             "data_root": str(Path(cfg.data_root).resolve()),
             "train_csv": str(Path(cfg.train_csv).resolve()),
-            "weights": str(Path(cfg.weights).resolve()),
+            "weights": [str(Path(weight).resolve()) for weight in weight_paths],
             "ids_csv": str(Path(cfg.ids_csv).resolve()),
             "protocol": "docs/METRICS_PROTOCOL.md",
             "hd95_units": "voxels",
@@ -487,6 +660,11 @@ def main() -> None:
             "roi_size": list(roi_size),
             "sw_batch_size": int(sw_batch_size),
             "overlap": float(overlap),
+            "sw_mode": str(sw_mode),
+            "sw_sigma_scale": float(sw_sigma_scale),
+            "tta_flips": [list(x) for x in cfg.tta_flips],
+            "num_models": int(len(weight_paths)),
+            "num_predictions_averaged": int(len(weight_paths) * (1 + len(cfg.tta_flips))),
         }
         (out_dir / str(cfg.eval_summary_name)).write_text(
             json.dumps(_json_safe(eval_summary), indent=2) + "\n",
@@ -494,7 +672,7 @@ def main() -> None:
         )
 
     summary = {
-        "weights": str(Path(cfg.weights).resolve()),
+        "weights": [str(Path(weight).resolve()) for weight in weight_paths],
         "ids_csv": str(Path(cfg.ids_csv).resolve()),
         "num_case_days": int(len(case_days)),
         "num_rows": int(len(rows)),
@@ -502,6 +680,11 @@ def main() -> None:
         "roi_size": list(roi_size),
         "sw_batch_size": int(sw_batch_size),
         "overlap": float(overlap),
+        "sw_mode": str(sw_mode),
+        "sw_sigma_scale": float(sw_sigma_scale),
+        "tta_flips": [list(x) for x in cfg.tta_flips],
+        "num_models": int(len(weight_paths)),
+        "num_predictions_averaged": int(len(weight_paths) * (1 + len(cfg.tta_flips))),
         "output_csv": str(out_csv),
         "export_pred_nifti": bool(cfg.export_pred_nifti),
         "pred_nifti_dir": str(out_dir / str(cfg.pred_nifti_dir_name)),

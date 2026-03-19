@@ -16,6 +16,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import math
 import platform
 import subprocess
 import time
@@ -35,6 +36,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from src.constants import CLASSES
 from src.data_utils import build_case_day_slices, build_rle_index, load_case_days, load_val_vis_samples
+from src.losses import DiceBceMultilabelLoss
 from src.metrics import DEFAULT_METRIC_NAMES, SegmentationMetricAccumulator
 
 try:
@@ -92,7 +94,7 @@ class TrainCfg:
     weight_decay: float = 1e-4
 
     # loss
-    loss_name: str = "dicece"  # dicece | dice | dicefocal | focal
+    loss_name: str = "dicece"  # dicece | dicebce | dice | dicefocal | focal
     loss_squared_pred: bool = True
     loss_reduction: str = "mean"
     loss_lambda_dice: float = 1.0
@@ -129,6 +131,14 @@ class TrainCfg:
     # caching
     train_cache_rate: float = 1.0
     val_cache_rate: float = 1.0
+
+    # early stopping
+    early_stop_enabled: bool = False
+    early_stop_metric: str = "val/dice_sw_mean"
+    early_stop_mode: str = "max"  # max | min
+    early_stop_min_epochs: int = 0
+    early_stop_patience: int = 0
+    early_stop_min_delta: float = 0.0
 
     @property
     def patch_size(self) -> tuple[int, int, int]:
@@ -443,6 +453,12 @@ def _build_loss(*, cfg: TrainCfg, cfg_module: Any) -> torch.nn.Module:
             lambda_ce=float(cfg.loss_lambda_ce),
             label_smoothing=float(cfg.loss_label_smoothing),
         )
+    if loss_name == "dicebce":
+        return DiceBceMultilabelLoss(
+            w_dice=float(cfg.loss_lambda_dice),
+            w_bce=float(cfg.loss_lambda_ce),
+            reduction=str(cfg.loss_reduction),
+        )
     if loss_name == "dice":
         return DiceLoss(**common_kwargs)
     if loss_name == "dicefocal":
@@ -521,6 +537,81 @@ def _to_case_day(x: Any) -> str:
         except Exception:
             return str(x)
     return str(x)
+
+
+def _extract_batch_orig_shape(batch: dict[str, Any], *, batch_index: int = 0) -> tuple[int, int, int] | None:
+    orig_shape = batch.get("orig_shape")
+    if orig_shape is None:
+        return None
+
+    def _to_int(item: Any) -> int:
+        if torch.is_tensor(item):
+            if item.ndim == 0:
+                return int(item.item())
+            return int(item[int(batch_index)].item())
+        if isinstance(item, (list, tuple)):
+            return int(item[int(batch_index)])
+        return int(item)
+
+    if torch.is_tensor(orig_shape):
+        if orig_shape.ndim == 1 and int(orig_shape.numel()) == 3:
+            vals = [int(x) for x in orig_shape.tolist()]
+            return int(vals[0]), int(vals[1]), int(vals[2])
+        if orig_shape.ndim >= 2 and int(orig_shape.shape[-1]) == 3:
+            vals = [int(x) for x in orig_shape[int(batch_index)].tolist()]
+            return int(vals[0]), int(vals[1]), int(vals[2])
+
+    if isinstance(orig_shape, (list, tuple)):
+        if len(orig_shape) == 3:
+            vals = [_to_int(x) for x in orig_shape]
+            return int(vals[0]), int(vals[1]), int(vals[2])
+        if len(orig_shape) > int(batch_index):
+            sample = orig_shape[int(batch_index)]
+            if isinstance(sample, (list, tuple)) and len(sample) == 3:
+                return int(sample[0]), int(sample[1]), int(sample[2])
+            if torch.is_tensor(sample) and sample.ndim == 1 and int(sample.numel()) == 3:
+                vals = [int(x) for x in sample.tolist()]
+                return int(vals[0]), int(vals[1]), int(vals[2])
+    return None
+
+
+def _crop_tensor_to_orig_shape(x: torch.Tensor, orig_shape: tuple[int, int, int] | None) -> torch.Tensor:
+    if orig_shape is None:
+        return x
+    orig_d, orig_h, orig_w = [int(v) for v in orig_shape]
+    return x[..., :orig_d, :orig_h, :orig_w]
+
+
+def _resolve_early_stop_value(
+    *,
+    metric_name: str,
+    val_summary: dict[str, float | int],
+    val_loss: float,
+) -> float:
+    metric_name = str(metric_name).strip()
+    if metric_name == "val/dice_sw_mean":
+        return float(val_summary["dice_mean"])
+    if metric_name == "val/precision_sw_mean":
+        return float(val_summary["precision_mean"])
+    if metric_name == "val/recall_sw_mean":
+        return float(val_summary["recall_mean"])
+    if metric_name == "val/hd95_sw_mean":
+        return float(val_summary["hd95_mean"])
+    if metric_name == "val/rve_sw_mean":
+        return float(val_summary["rve_mean"])
+    if metric_name == "val/loss_sw":
+        return float(val_loss)
+    raise ValueError(f"Unsupported early_stop_metric: {metric_name}")
+
+
+def _early_stop_improved(*, current: float, best: float | None, mode: str, min_delta: float) -> bool:
+    if best is None or not math.isfinite(float(best)):
+        return True
+    if mode == "max":
+        return float(current) > float(best) + float(min_delta)
+    if mode == "min":
+        return float(current) < float(best) - float(min_delta)
+    raise ValueError(f"Unsupported early_stop_mode: {mode}")
 
 
 def _overlay_masks_rgb(
@@ -650,6 +741,10 @@ def compute_sw_metrics(
                 predictor=model,
                 overlap=float(sw_overlap),
             )
+        orig_shape = _extract_batch_orig_shape(batch, batch_index=0)
+        logits = _crop_tensor_to_orig_shape(logits, orig_shape)
+        labels = _crop_tensor_to_orig_shape(labels, orig_shape)
+        with accelerator.autocast():
             loss = loss_function(logits, labels)
         total_loss += float(loss.item())
 
@@ -981,6 +1076,19 @@ def main() -> None:
         mlflow.set_tag("schedule.val_interval_steps", str(int(val_interval_steps)))
         mlflow.set_tag("schedule.val_vis_every_steps", str(int(val_vis_every_steps)))
 
+    early_stop_enabled = bool(cfg.early_stop_enabled) and int(cfg.early_stop_patience) > 0
+    early_stop_metric_name = str(cfg.early_stop_metric).strip()
+    early_stop_mode = str(cfg.early_stop_mode).strip().lower()
+    early_stop_min_epochs = max(0, int(cfg.early_stop_min_epochs))
+    early_stop_patience = max(0, int(cfg.early_stop_patience))
+    early_stop_min_delta = float(cfg.early_stop_min_delta)
+    early_stop_best_value: float | None = None
+    if early_stop_metric_name == "val/dice_sw_mean" and math.isfinite(float(best_metric)) and float(best_metric) >= 0.0:
+        early_stop_best_value = float(best_metric)
+    early_stop_bad_evals = 0
+    early_stop_stop_epoch: int | None = None
+    stop_reason = "max_epochs"
+
     training_start = time.time()
     for epoch in range(int(start_epoch), int(cfg.epochs) + 1):
         t0 = time.time()
@@ -1104,6 +1212,11 @@ def main() -> None:
             val_sw_recall_mean = float(val_sw_summary["recall_mean"])
             val_sw_hd95_mean = float(val_sw_summary["hd95_mean"]) if "hd95_mean" in val_sw_summary else float("nan")
             val_sw_rve_mean = float(val_sw_summary["rve_mean"])
+            early_stop_value = _resolve_early_stop_value(
+                metric_name=early_stop_metric_name,
+                val_summary=val_sw_summary,
+                val_loss=float(val_sw_loss),
+            )
 
             logger.info(
                 "Epoch %d global_step=%d train_dice=%.4f val_dice=%.4f val_precision=%.4f val_recall=%.4f val_hd95=%.4f val_rve=%.4f val_loss=%.4f val_time=%.1fs",
@@ -1128,6 +1241,7 @@ def main() -> None:
             writer.add_scalar("val/rve_sw", float(val_sw_rve_mean), int(global_step))
             writer.add_scalar("val/loss_sw", float(val_sw_loss), int(global_step))
             writer.add_scalar("system/val_time_sec", float(val_time), int(global_step))
+            writer.add_scalar("system/early_stop_metric", float(early_stop_value), int(global_step))
             if mlflow_enabled and mlflow is not None:
                 if train_patch_summary is not None:
                     mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(global_step))
@@ -1139,6 +1253,7 @@ def main() -> None:
                 mlflow.log_metric("val/rve_sw_mean", float(val_sw_rve_mean), step=int(global_step))
                 mlflow.log_metric("val/loss_sw", float(val_sw_loss), step=int(global_step))
                 mlflow.log_metric("system/val_time_sec", float(val_time), step=int(global_step))
+                mlflow.log_metric("system/early_stop_metric", float(early_stop_value), step=int(global_step))
 
             for i, cls_name in enumerate(CLASSES):
                 if train_patch_summary is not None:
@@ -1223,6 +1338,32 @@ def main() -> None:
                 )
                 logger.info("Saved new best model -> %s", str(out_dir / "best.pt"))
 
+            if early_stop_enabled:
+                improved = _early_stop_improved(
+                    current=float(early_stop_value),
+                    best=early_stop_best_value,
+                    mode=early_stop_mode,
+                    min_delta=float(early_stop_min_delta),
+                )
+                if improved:
+                    early_stop_best_value = float(early_stop_value)
+                    early_stop_bad_evals = 0
+                elif int(epoch) >= int(early_stop_min_epochs):
+                    early_stop_bad_evals += 1
+                logger.info(
+                    "Early stop monitor: metric=%s mode=%s value=%.6f best=%.6f bad_evals=%d/%d min_epochs=%d",
+                    early_stop_metric_name,
+                    early_stop_mode,
+                    float(early_stop_value),
+                    float(early_stop_best_value) if early_stop_best_value is not None else float("nan"),
+                    int(early_stop_bad_evals),
+                    int(early_stop_patience),
+                    int(early_stop_min_epochs),
+                )
+                if int(epoch) >= int(early_stop_min_epochs) and int(early_stop_bad_evals) >= int(early_stop_patience):
+                    early_stop_stop_epoch = int(epoch)
+                    stop_reason = "early_stop"
+
         unwrapped = accelerator.unwrap_model(model)
         torch.save(
             {
@@ -1236,6 +1377,10 @@ def main() -> None:
             },
             str(out_dir / "last.pt"),
         )
+
+        if early_stop_stop_epoch is not None:
+            logger.info("Early stopping triggered at epoch=%d", int(early_stop_stop_epoch))
+            break
 
     total = time.time() - training_start
     logger.info("Training done. best_metric=%.4f at epoch=%d", float(best_metric), int(best_metric_epoch))
@@ -1259,6 +1404,8 @@ def main() -> None:
         mlflow.log_metric("summary/best_metric", float(best_metric), step=int(global_step))
         mlflow.set_tag("summary/best_metric_epoch", str(int(best_metric_epoch)))
         mlflow.set_tag("summary/last_global_step", str(int(global_step)))
+        mlflow.set_tag("summary/stop_reason", str(stop_reason))
+        mlflow.set_tag("summary/stopped_early", "true" if stop_reason == "early_stop" else "false")
         if gpu_util_n:
             mlflow.log_metric("summary/avg_gpu_utilization_pct", float(gpu_util_sum) / float(gpu_util_n), step=int(global_step))
         if gpu_mem_util_n:

@@ -55,9 +55,9 @@ cfg.in_channels = 1
 cfg.out_channels = 3
 
 # patches / transforms
-cfg.patch_d = 80
-cfg.patch_h = 160
-cfg.patch_w = 160
+cfg.patch_d = 96
+cfg.patch_h = 224
+cfg.patch_w = 224
 
 # optimizer
 cfg.lr = 1.0e-4

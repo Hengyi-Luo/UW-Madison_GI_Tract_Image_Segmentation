@@ -48,16 +48,15 @@ cfg.mlflow_tracking_uri = "sqlite:///./mlflow.db"
 cfg.mlflow_experiment = "uwgi/segmentation"
 
 # model
-cfg.model_name = "Unet3D_ref_aug_epoch_150"
+cfg.model_name = "Unet3D_ref_aug"
 cfg.spatial_dims = 3
 cfg.in_channels = 1
 cfg.out_channels = 3
 
 # patches / transforms
-# Current training pipeline uses (D, H, W).
-cfg.patch_d = 80
-cfg.patch_h = 160
-cfg.patch_w = 160
+cfg.patch_d = 96
+cfg.patch_h = 224
+cfg.patch_w = 224
 
 # optimizer
 cfg.lr = 1.0e-4
@@ -70,7 +69,7 @@ cfg.lr_div_factor = 25
 cfg.lr_final_div_factor = 1000
 
 # training
-cfg.epochs = 150
+cfg.epochs = 100
 cfg.val_interval = 5
 cfg.train_patch_metrics_interval = 5
 cfg.val_hd95_interval = 0
@@ -79,7 +78,7 @@ cfg.train_batch_size = 8
 cfg.val_batch_size = 1
 
 # val (sliding window)
-cfg.sw_batch_size = 4
+cfg.sw_batch_size = 2
 cfg.sw_overlap = 0.25
 
 # visualization (TensorBoard images)

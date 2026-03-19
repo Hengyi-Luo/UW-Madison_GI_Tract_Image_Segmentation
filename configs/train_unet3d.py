@@ -53,9 +53,9 @@ cfg.lr_div_factor = 25
 cfg.lr_final_div_factor = 1000
 
 # training
-cfg.epochs = 100
+cfg.epochs = 150
 cfg.val_interval = 5
-cfg.train_patch_metrics_interval = 0
+cfg.train_patch_metrics_interval = 5
 cfg.val_hd95_interval = 0
 cfg.mixed_precision = "fp16"
 cfg.train_batch_size = 8

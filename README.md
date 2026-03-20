@@ -53,6 +53,8 @@ mamba env create -f environment.yml
 mamba activate uwgi
 ```
 
+`environment.yml` now includes both `torch` and `nnunetv2`. If you install manually instead of using the environment file, follow the official order and install PyTorch first, then `nnunetv2`.
+
 ## Baseline validation (reference)
 
 Baseline Dice numbers below are from `outputs/20260302-212100_Unet3D/best.pt`, evaluated via `scripts/infer_unet3d.py`
@@ -79,9 +81,35 @@ Train split (`inputs/splits/train_case_days.csv`):
 ## Docs
 
 - Training baseline details: `docs/TRAINING_BASELINE.md`
+- nnUNet baseline details: `docs/NNUNET_BASELINE.md`
 - MLflow tracking details: `docs/MLFLOW.md`
 - Metrics protocol and evaluation bias controls: `docs/METRICS_PROTOCOL.md`
 - Protocol benchmark script: `analysis/scripts/benchmark_metrics_protocol.py`
+
+## nnUNet baseline
+
+The repo now includes an `nnUNet v2` baseline that follows the official `DatasetXXX_Name` layout and uses the current recommended `ResEnc L` preset for `3d_fullres`.
+
+Prepare the dataset:
+
+```bash
+python scripts/prepare_nnunet_dataset.py --config configs/train_nnunet_baseline.py
+```
+
+Run the full baseline with MLflow logging:
+
+```bash
+python scripts/train_nnunet_baseline.py --config configs/train_nnunet_baseline.py
+```
+
+Artifacts include:
+
+- `nnUNet_raw/Dataset501_UWGI/dataset.json`
+- `nnUNet_preprocessed/Dataset501_UWGI/splits_final.json`
+- official `nnUNet` `validation/summary.json`
+- repo-side auxiliary `eval_summary.json`, `eval_per_case.csv`, and `submit.csv`
+
+Important caveat: this project's labels are originally multilabel, but the `nnUNet` baseline uses a lossy single-label collapse with fixed overwrite priority `stomach > small_bowel > large_bowel`. See `docs/NNUNET_BASELINE.md` for details.
 
 ## To update
 

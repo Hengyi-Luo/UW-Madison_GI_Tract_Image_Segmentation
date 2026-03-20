@@ -19,6 +19,12 @@ kaggle_weights/
 /notes/
 reference_pipeline/
 
+# nnUNet generated data / results
+/nnUNet_raw/
+/nnUNet_preprocessed/
+/nnUNet_results/
+/outputs/nnunet_baseline*/
+
 # Data / archives (avoid committing datasets)
 *.zip
 *.tar

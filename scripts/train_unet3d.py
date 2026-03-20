@@ -114,7 +114,6 @@ class TrainCfg:
     # training
     epochs: int = 150
     val_interval: int = 3
-    train_patch_metrics_interval: int = 0
     val_hd95_interval: int = 0
     mixed_precision: str = "fp16"  # no | fp16 | bf16
     train_batch_size: int = 16
@@ -130,6 +129,7 @@ class TrainCfg:
 
     # caching
     train_cache_rate: float = 1.0
+    train_eval_cache_rate: float = -1.0
     val_cache_rate: float = 1.0
 
     # early stopping
@@ -170,6 +170,7 @@ def _load_cfg(path: str) -> tuple[TrainCfg, Any]:
         raise ValueError(f"Config must be a Python module (.py), got: {cfg_path}")
     module = _load_python_module(cfg_path, module_name="train_unet3d_config")
     raw = _extract_python_cfg(module, cfg_path)
+    raw.pop("train_patch_metrics_interval", None)
 
     known = set(TrainCfg().__dict__.keys())
     unknown = sorted([k for k in raw.keys() if k not in known])
@@ -480,6 +481,13 @@ def _build_loss(*, cfg: TrainCfg, cfg_module: Any) -> torch.nn.Module:
     raise ValueError(f"Unsupported loss_name: {cfg.loss_name}")
 
 
+def _resolve_train_eval_cache_rate(cfg: TrainCfg) -> float:
+    train_eval_cache_rate = float(cfg.train_eval_cache_rate)
+    if train_eval_cache_rate >= 0.0:
+        return train_eval_cache_rate
+    return float(cfg.val_cache_rate)
+
+
 def _load_resume(
     cfg: TrainCfg,
     *,
@@ -657,11 +665,13 @@ def train_one_epoch(
     accelerator: Accelerator,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
     global_step: int,
-) -> tuple[float, float, int]:
+    threshold: float = 0.5,
+) -> tuple[float, float, dict[str, float | int], int]:
     model.train()
     device = accelerator.device
     epoch_loss = 0.0
     epoch_grad_norm = 0.0
+    patch_metric_acc = SegmentationMetricAccumulator(class_names=CLASSES, metric_names=["dice"], threshold=threshold)
 
     for batch in train_loader:
         images, labels = _batch_to_device(batch, device)
@@ -678,32 +688,13 @@ def train_one_epoch(
 
         epoch_loss += float(loss.item())
         epoch_grad_norm += float(grad_norm.item())
+        probs = torch.sigmoid(logits.detach())
+        preds = (probs > float(threshold)).float()
+        patch_metric_acc.update(preds, labels.detach())
         global_step += 1
 
     n = max(1, len(train_loader))
-    return epoch_loss / n, epoch_grad_norm / n, global_step
-
-
-@torch.no_grad()
-def compute_patch_metrics(
-    *,
-    model: torch.nn.Module,
-    data_loader: DataLoader,
-    accelerator: Accelerator,
-    threshold: float = 0.5,
-) -> dict[str, float | int]:
-    model.eval()
-    metric_acc = SegmentationMetricAccumulator(class_names=CLASSES, metric_names=["dice"], threshold=threshold)
-    device = accelerator.device
-    for batch in data_loader:
-        images, labels = _batch_to_device(batch, device)
-        with accelerator.autocast():
-            logits = model(images)
-        probs = torch.sigmoid(logits)
-        preds = (probs > float(threshold)).float()
-        metric_acc.update(preds, labels)
-    return metric_acc.summary()
-
+    return epoch_loss / n, epoch_grad_norm / n, patch_metric_acc.summary(), global_step
 
 @torch.no_grad()
 def compute_sw_metrics(
@@ -719,6 +710,7 @@ def compute_sw_metrics(
     threshold: float = 0.5,
     vis_case_day_to_slices: dict[str, list[int]] | None = None,
     logger: logging.Logger | None = None,
+    progress_label: str = "Validation",
 ) -> tuple[dict[str, float | int], float, list[tuple[str, torch.Tensor]]]:
     model.eval()
     metric_acc = SegmentationMetricAccumulator(
@@ -753,7 +745,8 @@ def compute_sw_metrics(
 
         if logger is not None:
             logger.info(
-                "Validation case %d/%d: inference done, computing metrics%s",
+                "%s case %d/%d: inference done, computing metrics%s",
+                str(progress_label),
                 batch_index,
                 total_batches,
                 " (including HD95)" if "hd95" in metric_acc.metric_names else "",
@@ -785,10 +778,45 @@ def compute_sw_metrics(
                     )
 
         if logger is not None and (batch_index % 10 == 0 or batch_index == total_batches):
-            logger.info("Validation progress: %d/%d cases", batch_index, total_batches)
+            logger.info("%s progress: %d/%d cases", str(progress_label), batch_index, total_batches)
 
     n = max(1, len(data_loader))
     return metric_acc.summary(), total_loss / n, vis_images
+
+
+def _log_sw_summary(
+    *,
+    split: str,
+    summary: dict[str, float | int],
+    loss_value: float,
+    writer: SummaryWriter,
+    global_step: int,
+    mlflow_enabled: bool,
+    mlflow: Any | None,
+) -> None:
+    mean_metric_names = ["dice", "precision", "recall", "hd95", "rve"]
+    for metric_name in mean_metric_names:
+        summary_key = f"{metric_name}_mean"
+        if summary_key not in summary:
+            continue
+        scalar_value = float(summary[summary_key])
+        writer.add_scalar(f"{split}/{metric_name}_sw", scalar_value, int(global_step))
+        if mlflow_enabled and mlflow is not None:
+            mlflow.log_metric(f"{split}/{metric_name}_sw_mean", scalar_value, step=int(global_step))
+
+    writer.add_scalar(f"{split}/loss_sw", float(loss_value), int(global_step))
+    if mlflow_enabled and mlflow is not None:
+        mlflow.log_metric(f"{split}/loss_sw", float(loss_value), step=int(global_step))
+
+    for cls_name in CLASSES:
+        for metric_name in mean_metric_names:
+            summary_key = f"{metric_name}_{cls_name}"
+            if summary_key not in summary:
+                continue
+            scalar_value = float(summary[summary_key])
+            writer.add_scalar(f"{split}/{metric_name}_sw_{cls_name}", scalar_value, int(global_step))
+            if mlflow_enabled and mlflow is not None:
+                mlflow.log_metric(f"{split}/{metric_name}_sw_{cls_name}", scalar_value, step=int(global_step))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -978,11 +1006,25 @@ def main() -> None:
     )
 
     t_cache = time.time()
-    logger.info("Caching train/val datasets... (workers=%d)", int(cfg.num_workers))
+    train_eval_cache_rate = _resolve_train_eval_cache_rate(cfg)
+    logger.info(
+        "Caching train/train_eval/val datasets... (workers=%d train=%.2f train_eval=%.2f val=%.2f)",
+        int(cfg.num_workers),
+        float(cfg.train_cache_rate),
+        float(train_eval_cache_rate),
+        float(cfg.val_cache_rate),
+    )
     train_ds = CacheDataset(
         data=train_files,
         transform=train_transforms,
         cache_rate=float(cfg.train_cache_rate),
+        num_workers=int(cfg.num_workers),
+        progress=False,
+    )
+    train_eval_ds = CacheDataset(
+        data=train_files,
+        transform=val_transforms,
+        cache_rate=float(train_eval_cache_rate),
         num_workers=int(cfg.num_workers),
         progress=False,
     )
@@ -1002,6 +1044,13 @@ def main() -> None:
         num_workers=int(cfg.num_workers),
         pin_memory=torch.cuda.is_available(),
         collate_fn=_pad_collate_keep_slice_idxs,
+    )
+    train_eval_loader = DataLoader(
+        train_eval_ds,
+        batch_size=int(cfg.val_batch_size),
+        shuffle=False,
+        num_workers=int(cfg.num_workers),
+        pin_memory=torch.cuda.is_available(),
     )
     val_loader = DataLoader(
         val_ds,
@@ -1037,7 +1086,13 @@ def main() -> None:
         logger=logger,
     )
 
-    model, optimizer, train_loader, val_loader = accelerator.prepare(model, optimizer, train_loader, val_loader)
+    model, optimizer, train_loader, train_eval_loader, val_loader = accelerator.prepare(
+        model,
+        optimizer,
+        train_loader,
+        train_eval_loader,
+        val_loader,
+    )
     loss_function = loss_function.to(accelerator.device)
 
     logger.info("Loss: %s", loss_function.__class__.__name__)
@@ -1092,7 +1147,7 @@ def main() -> None:
     training_start = time.time()
     for epoch in range(int(start_epoch), int(cfg.epochs) + 1):
         t0 = time.time()
-        epoch_loss, epoch_grad_norm, global_step = train_one_epoch(
+        epoch_loss, epoch_grad_norm, train_patch_summary, global_step = train_one_epoch(
             model=model,
             train_loader=train_loader,
             optimizer=optimizer,
@@ -1104,25 +1159,37 @@ def main() -> None:
         train_time = time.time() - t0
 
         current_lr = float(optimizer.param_groups[0]["lr"])
+        train_patch_dice_mean = float(train_patch_summary["dice_mean"])
         logger.info(
-            "Epoch %d global_step=%d loss=%.4f lr=%.2e train_time=%.1fs",
+            "Epoch %d global_step=%d loss=%.4f train_patch_dice=%.4f lr=%.2e train_time=%.1fs",
             epoch,
             int(global_step),
             epoch_loss,
+            train_patch_dice_mean,
             current_lr,
             train_time,
         )
         writer.add_scalar("train/loss", float(epoch_loss), int(global_step))
+        writer.add_scalar("train/dice_patch", float(train_patch_dice_mean), int(global_step))
         writer.add_scalar("train/lr", float(current_lr), int(global_step))
         writer.add_scalar("train/grad_norm", float(epoch_grad_norm), int(global_step))
         writer.add_scalar("system/train_time_sec", float(train_time), int(global_step))
         writer.add_scalar("system/epoch", float(epoch), int(global_step))
         if mlflow_enabled and mlflow is not None:
             mlflow.log_metric("train/loss", float(epoch_loss), step=int(global_step))
+            mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(global_step))
             mlflow.log_metric("train/lr", float(current_lr), step=int(global_step))
             mlflow.log_metric("train/grad_norm", float(epoch_grad_norm), step=int(global_step))
             mlflow.log_metric("system/train_time_sec", float(train_time), step=int(global_step))
             mlflow.log_metric("system/epoch", float(epoch), step=int(global_step))
+        for cls_name in CLASSES:
+            writer.add_scalar(f"train/dice_patch_{cls_name}", float(train_patch_summary[f"dice_{cls_name}"]), int(global_step))
+            if mlflow_enabled and mlflow is not None:
+                mlflow.log_metric(
+                    f"train/dice_patch_{cls_name}",
+                    float(train_patch_summary[f"dice_{cls_name}"]),
+                    step=int(global_step),
+                )
         if torch.cuda.is_available():
             mem_alloc_gb = float(torch.cuda.memory_allocated()) / (1024 * 1024 * 1024)
             mem_res_gb = float(torch.cuda.memory_reserved()) / (1024 * 1024 * 1024)
@@ -1161,13 +1228,11 @@ def main() -> None:
         if epoch % int(cfg.val_interval) == 0:
             t_val = time.time()
             model.eval()
-            run_train_patch_metrics = bool(cfg.train_patch_metrics_interval) and (
-                epoch % int(cfg.train_patch_metrics_interval) == 0
-            )
             run_hd95 = bool(cfg.val_hd95_interval) and (epoch % int(cfg.val_hd95_interval) == 0)
             val_metric_names = ["dice", "precision", "recall", "rve"]
             if run_hd95:
                 val_metric_names.append("hd95")
+            train_metric_names = [metric_name for metric_name in val_metric_names if metric_name != "hd95"]
 
             do_vis = bool(cfg.val_vis_every) and (epoch % int(cfg.val_vis_every) == 0) and bool(vis_samples)
             vis_case_day_to_slices: dict[str, list[int]] | None = None
@@ -1185,13 +1250,18 @@ def main() -> None:
                         continue
                     vis_case_day_to_slices.setdefault(cd, []).append(sp)
 
-            train_patch_summary = None
-            if run_train_patch_metrics:
-                train_patch_summary = compute_patch_metrics(
-                    model=model,
-                    data_loader=train_loader,
-                    accelerator=accelerator,
-                )
+            train_sw_summary, train_sw_loss, _ = compute_sw_metrics(
+                model=model,
+                data_loader=train_eval_loader,
+                accelerator=accelerator,
+                loss_function=loss_function,
+                roi_size=cfg.patch_size,
+                sw_batch_size=int(cfg.sw_batch_size),
+                sw_overlap=float(cfg.sw_overlap),
+                metric_names=train_metric_names,
+                logger=logger,
+                progress_label="Train SW",
+            )
             val_sw_summary, val_sw_loss, vis_images = compute_sw_metrics(
                 model=model,
                 data_loader=val_loader,
@@ -1203,10 +1273,15 @@ def main() -> None:
                 metric_names=val_metric_names,
                 vis_case_day_to_slices=vis_case_day_to_slices,
                 logger=logger,
+                progress_label="Val SW",
             )
             val_time = time.time() - t_val
 
-            train_patch_dice_mean = float(train_patch_summary["dice_mean"]) if train_patch_summary is not None else float("nan")
+            train_sw_dice_mean = float(train_sw_summary["dice_mean"])
+            train_sw_precision_mean = float(train_sw_summary["precision_mean"])
+            train_sw_recall_mean = float(train_sw_summary["recall_mean"])
+            train_sw_hd95_mean = float(train_sw_summary["hd95_mean"]) if "hd95_mean" in train_sw_summary else float("nan")
+            train_sw_rve_mean = float(train_sw_summary["rve_mean"])
             val_sw_dice_mean = float(val_sw_summary["dice_mean"])
             val_sw_precision_mean = float(val_sw_summary["precision_mean"])
             val_sw_recall_mean = float(val_sw_summary["recall_mean"])
@@ -1219,10 +1294,16 @@ def main() -> None:
             )
 
             logger.info(
-                "Epoch %d global_step=%d train_dice=%.4f val_dice=%.4f val_precision=%.4f val_recall=%.4f val_hd95=%.4f val_rve=%.4f val_loss=%.4f val_time=%.1fs",
+                "Epoch %d global_step=%d train_patch_dice=%.4f train_sw_dice=%.4f train_sw_precision=%.4f train_sw_recall=%.4f train_sw_hd95=%.4f train_sw_rve=%.4f train_sw_loss=%.4f val_dice=%.4f val_precision=%.4f val_recall=%.4f val_hd95=%.4f val_rve=%.4f val_loss=%.4f val_time=%.1fs",
                 epoch,
                 int(global_step),
                 float(train_patch_dice_mean),
+                float(train_sw_dice_mean),
+                float(train_sw_precision_mean),
+                float(train_sw_recall_mean),
+                float(train_sw_hd95_mean),
+                float(train_sw_rve_mean),
+                float(train_sw_loss),
                 float(val_sw_dice_mean),
                 float(val_sw_precision_mean),
                 float(val_sw_recall_mean),
@@ -1231,84 +1312,29 @@ def main() -> None:
                 float(val_sw_loss),
                 float(val_time),
             )
-            if train_patch_summary is not None:
-                writer.add_scalar("train/dice_patch", float(train_patch_dice_mean), int(global_step))
-            writer.add_scalar("val/dice_sw", float(val_sw_dice_mean), int(global_step))
-            writer.add_scalar("val/precision_sw", float(val_sw_precision_mean), int(global_step))
-            writer.add_scalar("val/recall_sw", float(val_sw_recall_mean), int(global_step))
-            if "hd95_mean" in val_sw_summary:
-                writer.add_scalar("val/hd95_sw", float(val_sw_hd95_mean), int(global_step))
-            writer.add_scalar("val/rve_sw", float(val_sw_rve_mean), int(global_step))
-            writer.add_scalar("val/loss_sw", float(val_sw_loss), int(global_step))
+            _log_sw_summary(
+                split="train",
+                summary=train_sw_summary,
+                loss_value=float(train_sw_loss),
+                writer=writer,
+                global_step=int(global_step),
+                mlflow_enabled=mlflow_enabled,
+                mlflow=mlflow,
+            )
+            _log_sw_summary(
+                split="val",
+                summary=val_sw_summary,
+                loss_value=float(val_sw_loss),
+                writer=writer,
+                global_step=int(global_step),
+                mlflow_enabled=mlflow_enabled,
+                mlflow=mlflow,
+            )
             writer.add_scalar("system/val_time_sec", float(val_time), int(global_step))
             writer.add_scalar("system/early_stop_metric", float(early_stop_value), int(global_step))
             if mlflow_enabled and mlflow is not None:
-                if train_patch_summary is not None:
-                    mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(global_step))
-                mlflow.log_metric("val/dice_sw_mean", float(val_sw_dice_mean), step=int(global_step))
-                mlflow.log_metric("val/precision_sw_mean", float(val_sw_precision_mean), step=int(global_step))
-                mlflow.log_metric("val/recall_sw_mean", float(val_sw_recall_mean), step=int(global_step))
-                if "hd95_mean" in val_sw_summary:
-                    mlflow.log_metric("val/hd95_sw_mean", float(val_sw_hd95_mean), step=int(global_step))
-                mlflow.log_metric("val/rve_sw_mean", float(val_sw_rve_mean), step=int(global_step))
-                mlflow.log_metric("val/loss_sw", float(val_sw_loss), step=int(global_step))
                 mlflow.log_metric("system/val_time_sec", float(val_time), step=int(global_step))
                 mlflow.log_metric("system/early_stop_metric", float(early_stop_value), step=int(global_step))
-
-            for i, cls_name in enumerate(CLASSES):
-                if train_patch_summary is not None:
-                    writer.add_scalar(
-                        f"train/dice_patch_{cls_name}",
-                        float(train_patch_summary[f"dice_{cls_name}"]),
-                        int(global_step),
-                    )
-                writer.add_scalar(f"val/dice_sw_{cls_name}", float(val_sw_summary[f"dice_{cls_name}"]), int(global_step))
-                writer.add_scalar(
-                    f"val/precision_sw_{cls_name}",
-                    float(val_sw_summary[f"precision_{cls_name}"]),
-                    int(global_step),
-                )
-                writer.add_scalar(
-                    f"val/recall_sw_{cls_name}",
-                    float(val_sw_summary[f"recall_{cls_name}"]),
-                    int(global_step),
-                )
-                if f"hd95_{cls_name}" in val_sw_summary:
-                    writer.add_scalar(f"val/hd95_sw_{cls_name}", float(val_sw_summary[f"hd95_{cls_name}"]), int(global_step))
-                writer.add_scalar(f"val/rve_sw_{cls_name}", float(val_sw_summary[f"rve_{cls_name}"]), int(global_step))
-                if mlflow_enabled and mlflow is not None:
-                    if train_patch_summary is not None:
-                        mlflow.log_metric(
-                            f"train/dice_patch_{cls_name}",
-                            float(train_patch_summary[f"dice_{cls_name}"]),
-                            step=int(global_step),
-                        )
-                    mlflow.log_metric(
-                        f"val/dice_sw_{cls_name}",
-                        float(val_sw_summary[f"dice_{cls_name}"]),
-                        step=int(global_step),
-                    )
-                    mlflow.log_metric(
-                        f"val/precision_sw_{cls_name}",
-                        float(val_sw_summary[f"precision_{cls_name}"]),
-                        step=int(global_step),
-                    )
-                    mlflow.log_metric(
-                        f"val/recall_sw_{cls_name}",
-                        float(val_sw_summary[f"recall_{cls_name}"]),
-                        step=int(global_step),
-                    )
-                    if f"hd95_{cls_name}" in val_sw_summary:
-                        mlflow.log_metric(
-                            f"val/hd95_sw_{cls_name}",
-                            float(val_sw_summary[f"hd95_{cls_name}"]),
-                            step=int(global_step),
-                        )
-                    mlflow.log_metric(
-                        f"val/rve_sw_{cls_name}",
-                        float(val_sw_summary[f"rve_{cls_name}"]),
-                        step=int(global_step),
-                    )
 
             if do_vis and vis_images:
                 for tag, img in vis_images:

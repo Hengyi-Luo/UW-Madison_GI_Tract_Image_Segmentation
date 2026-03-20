@@ -72,7 +72,6 @@ cfg.lr_final_div_factor = 1000
 # training
 cfg.epochs = 150
 cfg.val_interval = 5
-cfg.train_patch_metrics_interval = 5
 cfg.val_hd95_interval = 0
 cfg.mixed_precision = "fp16"
 cfg.train_batch_size = 8
@@ -87,7 +86,8 @@ cfg.val_vis_every = 10
 cfg.val_vis_samples = "inputs/splits/val_vis_samples.json"
 
 # caching
-cfg.train_cache_rate = 0.8
+cfg.train_cache_rate = 1.0
+cfg.train_eval_cache_rate = 0.0
 cfg.val_cache_rate = 0.0
 
 

@@ -656,6 +656,65 @@ def _overlay_masks_rgb(
     return out.clamp(0, 1)
 
 
+def _summarize_patch_dice(
+    intersection_sum: torch.Tensor,
+    pred_sum: torch.Tensor,
+    target_sum: torch.Tensor,
+    num_patches: int,
+) -> dict[str, float | int]:
+    gt_present = target_sum > 0
+    dice = torch.full_like(intersection_sum, float("nan"), dtype=torch.float32)
+    valid_denominator = (pred_sum + target_sum) > 0
+    valid_mask = gt_present & valid_denominator
+    dice[valid_mask] = (2.0 * intersection_sum[valid_mask]) / (pred_sum[valid_mask] + target_sum[valid_mask])
+
+    summary: dict[str, float | int] = {"num_cases": int(num_patches)}
+    finite_dice = dice[torch.isfinite(dice)]
+    summary["dice_mean"] = float(finite_dice.mean().item()) if finite_dice.numel() > 0 else float("nan")
+
+    for class_idx, cls_name in enumerate(CLASSES):
+        class_dice = dice[class_idx]
+        summary[f"dice_{cls_name}"] = float(class_dice.item()) if torch.isfinite(class_dice) else float("nan")
+
+    return summary
+
+
+@torch.no_grad()
+def compute_patch_metrics(
+    *,
+    model: torch.nn.Module,
+    data_loader: DataLoader,
+    accelerator: Accelerator,
+    threshold: float = 0.5,
+) -> dict[str, float | int]:
+    model.eval()
+    device = accelerator.device
+    num_classes = len(CLASSES)
+    patch_intersection_sum = torch.zeros(num_classes, dtype=torch.float32, device=device)
+    patch_pred_sum = torch.zeros(num_classes, dtype=torch.float32, device=device)
+    patch_target_sum = torch.zeros(num_classes, dtype=torch.float32, device=device)
+    num_patches = 0
+
+    for batch in data_loader:
+        images, labels = _batch_to_device(batch, device)
+        with accelerator.autocast():
+            logits = model(images)
+        pred_mask = torch.sigmoid(logits) > float(threshold)
+        target_mask = labels > float(threshold)
+        reduce_dims = tuple(range(2, pred_mask.ndim))
+        patch_intersection_sum += (pred_mask & target_mask).sum(dim=reduce_dims).float().sum(dim=0)
+        patch_pred_sum += pred_mask.sum(dim=reduce_dims).float().sum(dim=0)
+        patch_target_sum += target_mask.sum(dim=reduce_dims).float().sum(dim=0)
+        num_patches += int(pred_mask.shape[0])
+
+    return _summarize_patch_dice(
+        patch_intersection_sum.detach().cpu(),
+        patch_pred_sum.detach().cpu(),
+        patch_target_sum.detach().cpu(),
+        num_patches,
+    )
+
+
 def train_one_epoch(
     *,
     model: torch.nn.Module,
@@ -665,16 +724,13 @@ def train_one_epoch(
     accelerator: Accelerator,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
     global_step: int,
-    threshold: float = 0.5,
-) -> tuple[float, float, dict[str, float | int], int]:
+) -> tuple[float, float, int]:
     model.train()
-    device = accelerator.device
     epoch_loss = 0.0
     epoch_grad_norm = 0.0
-    patch_metric_acc = SegmentationMetricAccumulator(class_names=CLASSES, metric_names=["dice"], threshold=threshold)
 
     for batch in train_loader:
-        images, labels = _batch_to_device(batch, device)
+        images, labels = _batch_to_device(batch, accelerator.device)
         optimizer.zero_grad(set_to_none=True)
 
         with accelerator.autocast():
@@ -688,13 +744,10 @@ def train_one_epoch(
 
         epoch_loss += float(loss.item())
         epoch_grad_norm += float(grad_norm.item())
-        probs = torch.sigmoid(logits.detach())
-        preds = (probs > float(threshold)).float()
-        patch_metric_acc.update(preds, labels.detach())
         global_step += 1
 
     n = max(1, len(train_loader))
-    return epoch_loss / n, epoch_grad_norm / n, patch_metric_acc.summary(), global_step
+    return epoch_loss / n, epoch_grad_norm / n, global_step
 
 @torch.no_grad()
 def compute_sw_metrics(
@@ -1147,7 +1200,7 @@ def main() -> None:
     training_start = time.time()
     for epoch in range(int(start_epoch), int(cfg.epochs) + 1):
         t0 = time.time()
-        epoch_loss, epoch_grad_norm, train_patch_summary, global_step = train_one_epoch(
+        epoch_loss, epoch_grad_norm, global_step = train_one_epoch(
             model=model,
             train_loader=train_loader,
             optimizer=optimizer,
@@ -1159,37 +1212,25 @@ def main() -> None:
         train_time = time.time() - t0
 
         current_lr = float(optimizer.param_groups[0]["lr"])
-        train_patch_dice_mean = float(train_patch_summary["dice_mean"])
         logger.info(
-            "Epoch %d global_step=%d loss=%.4f train_patch_dice=%.4f lr=%.2e train_time=%.1fs",
+            "Epoch %d global_step=%d loss=%.4f lr=%.2e train_time=%.1fs",
             epoch,
             int(global_step),
             epoch_loss,
-            train_patch_dice_mean,
             current_lr,
             train_time,
         )
         writer.add_scalar("train/loss", float(epoch_loss), int(global_step))
-        writer.add_scalar("train/dice_patch", float(train_patch_dice_mean), int(global_step))
         writer.add_scalar("train/lr", float(current_lr), int(global_step))
         writer.add_scalar("train/grad_norm", float(epoch_grad_norm), int(global_step))
         writer.add_scalar("system/train_time_sec", float(train_time), int(global_step))
         writer.add_scalar("system/epoch", float(epoch), int(global_step))
         if mlflow_enabled and mlflow is not None:
             mlflow.log_metric("train/loss", float(epoch_loss), step=int(global_step))
-            mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(global_step))
             mlflow.log_metric("train/lr", float(current_lr), step=int(global_step))
             mlflow.log_metric("train/grad_norm", float(epoch_grad_norm), step=int(global_step))
             mlflow.log_metric("system/train_time_sec", float(train_time), step=int(global_step))
             mlflow.log_metric("system/epoch", float(epoch), step=int(global_step))
-        for cls_name in CLASSES:
-            writer.add_scalar(f"train/dice_patch_{cls_name}", float(train_patch_summary[f"dice_{cls_name}"]), int(global_step))
-            if mlflow_enabled and mlflow is not None:
-                mlflow.log_metric(
-                    f"train/dice_patch_{cls_name}",
-                    float(train_patch_summary[f"dice_{cls_name}"]),
-                    step=int(global_step),
-                )
         if torch.cuda.is_available():
             mem_alloc_gb = float(torch.cuda.memory_allocated()) / (1024 * 1024 * 1024)
             mem_res_gb = float(torch.cuda.memory_reserved()) / (1024 * 1024 * 1024)
@@ -1233,6 +1274,11 @@ def main() -> None:
             if run_hd95:
                 val_metric_names.append("hd95")
             train_metric_names = [metric_name for metric_name in val_metric_names if metric_name != "hd95"]
+            train_patch_summary = compute_patch_metrics(
+                model=model,
+                data_loader=train_loader,
+                accelerator=accelerator,
+            )
 
             do_vis = bool(cfg.val_vis_every) and (epoch % int(cfg.val_vis_every) == 0) and bool(vis_samples)
             vis_case_day_to_slices: dict[str, list[int]] | None = None
@@ -1277,6 +1323,7 @@ def main() -> None:
             )
             val_time = time.time() - t_val
 
+            train_patch_dice_mean = float(train_patch_summary["dice_mean"])
             train_sw_dice_mean = float(train_sw_summary["dice_mean"])
             train_sw_precision_mean = float(train_sw_summary["precision_mean"])
             train_sw_recall_mean = float(train_sw_summary["recall_mean"])
@@ -1312,6 +1359,17 @@ def main() -> None:
                 float(val_sw_loss),
                 float(val_time),
             )
+            writer.add_scalar("train/dice_patch", float(train_patch_dice_mean), int(global_step))
+            if mlflow_enabled and mlflow is not None:
+                mlflow.log_metric("train/dice_patch_mean", float(train_patch_dice_mean), step=int(global_step))
+            for cls_name in CLASSES:
+                writer.add_scalar(f"train/dice_patch_{cls_name}", float(train_patch_summary[f"dice_{cls_name}"]), int(global_step))
+                if mlflow_enabled and mlflow is not None:
+                    mlflow.log_metric(
+                        f"train/dice_patch_{cls_name}",
+                        float(train_patch_summary[f"dice_{cls_name}"]),
+                        step=int(global_step),
+                    )
             _log_sw_summary(
                 split="train",
                 summary=train_sw_summary,

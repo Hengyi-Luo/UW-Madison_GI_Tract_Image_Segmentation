@@ -8,7 +8,7 @@ Also optionally computes case_day-level Dice evaluation and summary (when `evalu
 GT masks from inputs/train.csv.
 
 Usage:
-  python scripts/infer_unet3d.py --config configs/infer_unet3d.py
+  python scripts/infer_unet3d.py --config configs/infer_unet3d_benchmark.py
 
 Default output:
   <weights_parent>/infer/submit.csv
@@ -454,12 +454,23 @@ def _predict_probs(
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
-    p.add_argument("--config", type=str, default="configs/infer_unet3d.py")
+    p.add_argument("--config", type=str, default="configs/infer_unet3d_benchmark.py")
     p.add_argument("--weights", type=str, default="", help="Override cfg.weights")
     p.add_argument("--ids_csv", type=str, default="", help="Override cfg.ids_csv")
     p.add_argument("--output_dir", type=str, default="", help="Override cfg.output_dir")
     p.add_argument("--device", type=str, default="", help="Override cfg.device")
     p.add_argument("--num_workers", type=int, default=None, help="Override cfg.num_workers")
+    p.add_argument(
+        "--tta_flips",
+        type=str,
+        default="",
+        help="Override cfg.tta_flips with JSON, for example '[[1],[2],[1,2]]' or '[]'.",
+    )
+    p.add_argument(
+        "--disable_tta",
+        action="store_true",
+        help="Force cfg.tta_flips=[] regardless of config defaults.",
+    )
     p.add_argument(
         "--export-pred-nifti",
         action="store_true",
@@ -487,6 +498,10 @@ def main() -> None:
         cfg = _apply_cfg_overrides(cfg, device=args.device)
     if args.num_workers is not None:
         cfg = _apply_cfg_overrides(cfg, num_workers=int(args.num_workers))
+    if args.tta_flips:
+        cfg = _apply_cfg_overrides(cfg, tta_flips=args.tta_flips)
+    if args.disable_tta:
+        cfg = _apply_cfg_overrides(cfg, tta_flips=[])
     if args.export_pred_nifti:
         cfg = _apply_cfg_overrides(cfg, export_pred_nifti=True)
     if args.unsafe_load:

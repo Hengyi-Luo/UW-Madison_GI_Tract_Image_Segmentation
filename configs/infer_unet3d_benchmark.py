@@ -9,8 +9,11 @@ cfg.ids_csv = "inputs/splits/val_case_days.csv"
 cfg.train_csv = "inputs/train.csv"
 
 # weights / outputs
-cfg.weights = "outputs/20260318-114555_Unet3D_ref_loss_diceBCE_epoch_150/best.pt"
-cfg.output_dir = "outputs/benchmark_infer_single_tta"
+# Canonical benchmark inference profile:
+# - current best single-model weights by default
+# - override with --weights for a different checkpoint or an ensemble
+cfg.weights = "outputs/20260319-173558_Unet3D_ref_loss_diceBCE_safe_aug/best.pt"
+cfg.output_dir = "outputs/benchmark_infer"
 
 # CSV + NIfTI outputs
 cfg.out_csv_name = "submit.csv"

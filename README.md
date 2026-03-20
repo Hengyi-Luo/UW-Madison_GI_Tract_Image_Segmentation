@@ -78,6 +78,44 @@ Train split (`inputs/splits/train_case_days.csv`):
   - `small_bowel`: **0.9046**
   - `stomach`: **0.9516**
 
+## Inference benchmark record
+
+Current default inference config:
+
+```bash
+python scripts/infer_unet3d.py
+```
+
+This now defaults to:
+
+```bash
+configs/infer_unet3d_benchmark.py
+```
+
+Kept infer config families:
+
+- `configs/infer_unet3d.py`: old baseline infer profile
+- `configs/infer_unet3d_benchmark.py`: current benchmark profile (`safe_unit_scale` + gaussian SW + in-plane TTA)
+- `configs/infer_unet3d_reference_transforms.py`: special profile for the old reference-transforms model family
+
+Val benchmark snapshots (`inputs/splits/val_case_days.csv`, 58 case_days) under the unified benchmark profile:
+
+| Recipe | Weights | TTA | Mean Dice | Large bowel | Small bowel | Stomach | Example command |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| Single | `20260319-173558_Unet3D_ref_loss_diceBCE_safe_aug/best.pt` | No | **0.7879** | 0.7955 | 0.6958 | 0.8725 | `python scripts/infer_unet3d.py --config configs/infer_unet3d_benchmark.py --weights outputs/20260319-173558_Unet3D_ref_loss_diceBCE_safe_aug/best.pt --disable_tta --output_dir outputs/benchmark_infer_single` |
+| Single | `20260318-114555_Unet3D_ref_loss_diceBCE_epoch_150/best.pt` | in-plane flips `[[1], [2], [1, 2]]` | **0.7888** | 0.7937 | 0.7006 | 0.8722 | `python scripts/infer_unet3d.py --config configs/infer_unet3d_benchmark.py --weights outputs/20260318-114555_Unet3D_ref_loss_diceBCE_epoch_150/best.pt --output_dir outputs/benchmark_infer_single_tta` |
+| Dual ensemble | `20260316-202538_Unet3D/best.pt` + `20260319-173558_Unet3D_ref_loss_diceBCE_safe_aug/best.pt` | in-plane flips `[[1], [2], [1, 2]]` | **0.7742** | 0.7851 | 0.6838 | 0.8538 | `python scripts/infer_unet3d.py --config configs/infer_unet3d_benchmark.py --weights outputs/20260316-202538_Unet3D/best.pt,outputs/20260319-173558_Unet3D_ref_loss_diceBCE_safe_aug/best.pt --output_dir outputs/benchmark_infer_dual_tta` |
+
+Notes:
+- The benchmark config is now generic; single vs ensemble and TTA on/off are CLI-level choices.
+- `--weights` accepts either one checkpoint path or a comma-separated list for ensembles.
+- `--disable_tta` forces `tta_flips=[]`; otherwise the benchmark profile uses in-plane flips by default.
+- All benchmark runs use `roi_size=[96,224,224]`, `sw_batch_size=2`, `threshold=0.5`, `overlap=0.5`, `sw_mode="gaussian"`, and `intensity_norm="safe_unit_scale"`.
+- Raw summaries are stored in:
+  - `outputs/benchmark_infer_single/eval_summary.json`
+  - `outputs/benchmark_infer_single_tta/eval_summary.json`
+  - `outputs/benchmark_infer_dual_tta/eval_summary.json`
+
 ## Docs
 
 - Training baseline details: `docs/TRAINING_BASELINE.md`
